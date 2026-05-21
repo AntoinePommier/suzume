@@ -1,5 +1,10 @@
+import { ReaderProvider } from "@epubjs-react-native/core";
 import { Stack } from "expo-router";
 
 export default function RootLayout() {
-	return <Stack screenOptions={{ headerShown: false }} />;
+	return (
+		<ReaderProvider>
+			<Stack screenOptions={{ headerShown: false }} />
+		</ReaderProvider>
+	);
 }
