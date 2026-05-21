@@ -1,3 +1,4 @@
+import { books } from "@/books";
 import { router } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { Pressable, StyleSheet, Text, View } from "react-native";
@@ -9,11 +10,25 @@ export default function HomeScreen() {
 
 			<Text style={styles.title}>Suzume</Text>
 
-			<Text style={styles.subtitle}>Japanese ebook reader</Text>
+			<Text style={styles.subtitle}>Choose a book</Text>
 
-			<Pressable style={styles.button} onPress={() => router.push("./reader")}>
-				<Text style={styles.buttonText}>Start Reading</Text>
-			</Pressable>
+			<View style={styles.bookList}>
+				{books.map((book) => (
+					<Pressable
+						key={book.id}
+						style={styles.bookButton}
+						onPress={() =>
+							router.push({
+								pathname: "./reader",
+								params: { bookId: book.id },
+							})
+						}
+					>
+						<Text style={styles.bookTitle}>{book.title}</Text>
+						<Text style={styles.bookSubtitle}>{book.subtitle}</Text>
+					</Pressable>
+				))}
+			</View>
 		</View>
 	);
 }
@@ -35,16 +50,27 @@ const styles = StyleSheet.create({
 		fontSize: 16,
 		color: "#999999",
 	},
-	button: {
+	bookList: {
 		marginTop: 24,
+		width: "100%",
+		maxWidth: 360,
+		gap: 12,
 		paddingHorizontal: 24,
-		paddingVertical: 12,
-		backgroundColor: "#ffffff",
-		borderRadius: 12,
 	},
-	buttonText: {
+	bookButton: {
+		paddingHorizontal: 18,
+		paddingVertical: 16,
+		backgroundColor: "#ffffff",
+		borderRadius: 8,
+	},
+	bookTitle: {
 		color: "#111111",
-		fontSize: 16,
+		fontSize: 17,
 		fontWeight: "600",
+	},
+	bookSubtitle: {
+		marginTop: 4,
+		color: "#666666",
+		fontSize: 14,
 	},
 });

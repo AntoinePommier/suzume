@@ -1,9 +1,210 @@
+import { getBookById } from "@/books";
 import { Reader } from "@epubjs-react-native/core";
+import jszipSource from "@epubjs-react-native/core/lib/module/jszip";
 import { Asset } from "expo-asset";
 import * as ExpoFileSystem from "expo-file-system/legacy";
-import { router } from "expo-router";
+import { router, useLocalSearchParams } from "expo-router";
 import { useCallback, useEffect, useState } from "react";
 import { Pressable, Text, View } from "react-native";
+
+const readerTheme = {
+	body: {
+		background: "#f8f5ee !important",
+		color: "#111111 !important",
+	},
+	p: {
+		color: "#111111 !important",
+	},
+	span: {
+		color: "#111111 !important",
+	},
+};
+
+type ReadingDirection = "ltr" | "rtl";
+
+let JSZipConstructor: any;
+
+function getJSZipConstructor() {
+	if (JSZipConstructor) {
+		return JSZipConstructor;
+	}
+
+	const scope: { JSZip?: any } = {};
+	const source =
+		typeof jszipSource === "string"
+			? jszipSource
+			: (jszipSource as { default?: string }).default;
+
+	if (!source) {
+		throw new Error("Unable to load EPUB metadata parser source");
+	}
+
+	const createJSZip = new Function(
+		"scope",
+		`
+			var window = scope;
+			var global = scope;
+			var self = scope;
+			var module = { exports: undefined };
+			var exports = module.exports;
+
+			${source}
+
+			return module.exports || scope.JSZip;
+		`,
+	);
+
+	JSZipConstructor = createJSZip(scope);
+
+	if (!JSZipConstructor) {
+		throw new Error("Unable to initialize EPUB metadata parser");
+	}
+
+	return JSZipConstructor;
+}
+
+async function detectReadingDirection(
+	bookBase64: string,
+): Promise<ReadingDirection> {
+	const JSZip = getJSZipConstructor();
+	const zip = await JSZip.loadAsync(bookBase64, { base64: true });
+	const container = await zip.file("META-INF/container.xml")?.async("text");
+	const opfPath = container?.match(
+		/<rootfile\b[^>]*\bfull-path=["']([^"']+)/i,
+	)?.[1];
+
+	if (!opfPath) {
+		return "ltr";
+	}
+
+	const opf = await zip.file(opfPath)?.async("text");
+
+	if (!opf) {
+		return "ltr";
+	}
+
+	const pageProgressionDirection = opf
+		.match(/<spine\b[^>]*\bpage-progression-direction=["']([^"']+)/i)?.[1]
+		?.toLowerCase();
+
+	if (pageProgressionDirection === "rtl") {
+		return "rtl";
+	}
+
+	if (pageProgressionDirection === "ltr") {
+		return "ltr";
+	}
+
+	const primaryWritingMode = opf
+		.match(
+			/<meta\b[^>]*\bname=["']primary-writing-mode["'][^>]*\bcontent=["']([^"']+)/i,
+		)?.[1]
+		?.toLowerCase();
+
+	return primaryWritingMode === "vertical-rl" ? "rtl" : "ltr";
+}
+
+const rtlSwipeScript = `
+(() => {
+	const minSwipeDistance = 60;
+	const maxVerticalRatio = 1.5;
+	let isPaging = false;
+
+	function attachSwipe(target) {
+		if (!target || target.__suzumeRtlSwipeAttached) {
+			return;
+		}
+
+		target.__suzumeRtlSwipeAttached = true;
+
+		let startX = 0;
+		let startY = 0;
+
+		target.addEventListener("touchstart", (event) => {
+			const touch = event.changedTouches && event.changedTouches[0];
+
+			if (!touch) {
+				return;
+			}
+
+			startX = touch.clientX;
+			startY = touch.clientY;
+		}, { passive: true });
+
+		target.addEventListener("touchend", (event) => {
+			const touch = event.changedTouches && event.changedTouches[0];
+
+			if (!touch || isPaging || typeof rendition === "undefined") {
+				return;
+			}
+
+			const deltaX = touch.clientX - startX;
+			const deltaY = touch.clientY - startY;
+
+			if (
+				Math.abs(deltaX) < minSwipeDistance ||
+				Math.abs(deltaX) < Math.abs(deltaY) * maxVerticalRatio
+			) {
+				return;
+			}
+
+			isPaging = true;
+
+			const pageTurn = deltaX > 0 ? rendition.next() : rendition.prev();
+
+			Promise.resolve(pageTurn)
+				.catch(() => {})
+				.finally(() => {
+					setTimeout(() => {
+						isPaging = false;
+						attachToRenderedContents();
+					}, 250);
+				});
+		}, { passive: true });
+	}
+
+	function attachSwipeToContents(contents) {
+		if (!contents) {
+			return;
+		}
+
+		attachSwipe(contents.window);
+		attachSwipe(contents.document);
+		attachSwipe(contents.document && contents.document.documentElement);
+		attachSwipe(contents.document && contents.document.body);
+	}
+
+	function attachToRenderedContents() {
+		attachSwipe(window);
+		attachSwipe(document);
+		attachSwipe(document.documentElement);
+		attachSwipe(document.body);
+
+		if (typeof rendition === "undefined" || !rendition.getContents) {
+			return;
+		}
+
+		rendition.getContents().forEach(attachSwipeToContents);
+	}
+
+	attachToRenderedContents();
+
+	if (typeof rendition !== "undefined") {
+		if (rendition.hooks && rendition.hooks.content) {
+			rendition.hooks.content.register((contents) => {
+				attachSwipeToContents(contents);
+			});
+		}
+
+		rendition.on("rendered", attachToRenderedContents);
+		rendition.on("relocated", attachToRenderedContents);
+		rendition.on("resized", attachToRenderedContents);
+	}
+
+	setInterval(attachToRenderedContents, 1000);
+})();
+true;
+`;
 
 function useLegacyFileSystem() {
 	const [file, setFile] = useState<string | null>(null);
@@ -87,20 +288,57 @@ function useLegacyFileSystem() {
 }
 
 export default function ReaderScreen() {
+	const { bookId } = useLocalSearchParams<{ bookId?: string }>();
+	const selectedBook = getBookById(bookId);
 	const [bookUri, setBookUri] = useState<string | null>(null);
+	const [bookError, setBookError] = useState<string | null>(null);
+	const [readingDirection, setReadingDirection] =
+		useState<ReadingDirection>("ltr");
 
 	useEffect(() => {
-		async function loadBook() {
-			const book = Asset.fromModule(
-				require("../../assets/books/shika-no-ou-1.epub"),
-			);
+		let isMounted = true;
+		setBookUri(null);
+		setBookError(null);
+		setReadingDirection("ltr");
 
-			await book.downloadAsync();
-			setBookUri(book.localUri ?? book.uri);
+		async function loadBook() {
+			try {
+				const book = Asset.fromModule(selectedBook.asset);
+
+				await book.downloadAsync();
+
+				if (!book.localUri) {
+					throw new Error("Book asset was not downloaded locally");
+				}
+
+				const bookBase64 = await ExpoFileSystem.readAsStringAsync(
+					book.localUri,
+					{
+						encoding: "base64",
+					},
+				);
+				const detectedReadingDirection =
+					await detectReadingDirection(bookBase64);
+
+				if (isMounted) {
+					setReadingDirection(detectedReadingDirection);
+					setBookUri(bookBase64);
+				}
+			} catch (err) {
+				if (isMounted) {
+					setBookError(
+						err instanceof Error ? err.message : "Unable to load book",
+					);
+				}
+			}
 		}
 
 		loadBook();
-	}, []);
+
+		return () => {
+			isMounted = false;
+		};
+	}, [selectedBook.asset]);
 
 	return (
 		<View style={{ flex: 1, backgroundColor: "#111111" }}>
@@ -113,7 +351,7 @@ export default function ReaderScreen() {
 					zIndex: 10,
 				}}
 			>
-				<Text style={{ color: "white", fontSize: 18 }}>← Back</Text>
+				<Text style={{ color: "white", fontSize: 18 }}>← Books</Text>
 			</Pressable>
 
 			{bookUri ? (
@@ -128,19 +366,11 @@ export default function ReaderScreen() {
 						src={bookUri}
 						fileSystem={useLegacyFileSystem}
 						flow="paginated"
-						enableSwipe
-						defaultTheme={{
-							body: {
-								background: "#f8f5ee !important",
-								color: "#111111 !important",
-							},
-							p: {
-								color: "#111111 !important",
-							},
-							span: {
-								color: "#111111 !important",
-							},
-						}}
+						enableSwipe={readingDirection === "ltr"}
+						defaultTheme={readerTheme}
+						injectedJavascript={
+							readingDirection === "rtl" ? rtlSwipeScript : undefined
+						}
 					/>
 				</View>
 			) : (
@@ -151,7 +381,9 @@ export default function ReaderScreen() {
 						justifyContent: "center",
 					}}
 				>
-					<Text style={{ color: "white", fontSize: 18 }}>Loading book...</Text>
+					<Text style={{ color: "white", fontSize: 18 }}>
+						{bookError ?? "Loading book..."}
+					</Text>
 				</View>
 			)}
 		</View>
