@@ -3,6 +3,7 @@ import {
 	DictionaryBottomSheet,
 	dictionaryTapScript,
 	type DictionaryBridgeMessage,
+	type DictionarySelection,
 } from "@/features/dictionary";
 import { Reader } from "@epubjs-react-native/core";
 import jszipSource from "@epubjs-react-native/core/lib/module/jszip";
@@ -297,9 +298,8 @@ export default function ReaderScreen() {
 	const selectedBook = getBookById(bookId);
 	const [bookUri, setBookUri] = useState<string | null>(null);
 	const [bookError, setBookError] = useState<string | null>(null);
-	const [dictionarySelection, setDictionarySelection] = useState<string | null>(
-		null,
-	);
+	const [dictionarySelection, setDictionarySelection] =
+		useState<DictionarySelection | null>(null);
 	const [readingDirection, setReadingDirection] =
 		useState<ReadingDirection>("ltr");
 	const injectedReaderJavascript =
@@ -317,12 +317,12 @@ export default function ReaderScreen() {
 			if (
 				message.type !== "dictionary-tap" ||
 				!("payload" in message) ||
-				!message.payload.text
+				!message.payload.character
 			) {
 				return;
 			}
 
-			setDictionarySelection(message.payload.text);
+			setDictionarySelection(message.payload);
 		},
 		[],
 	);
@@ -420,7 +420,7 @@ export default function ReaderScreen() {
 			)}
 
 			<DictionaryBottomSheet
-				text={dictionarySelection}
+				selection={dictionarySelection}
 				onDismiss={() => setDictionarySelection(null)}
 			/>
 		</View>

@@ -1,9 +1,14 @@
 export type DictionaryTapMessage = {
 	type: "dictionary-tap";
 	payload: {
-		text: string;
+		character: string;
+		before: string;
+		after: string;
+		context: string;
 	};
 };
+
+export type DictionarySelection = DictionaryTapMessage["payload"];
 
 export type DictionaryCloseMessage = {
 	type: "dictionary-close";
