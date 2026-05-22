@@ -63,6 +63,10 @@ export type DictionaryLookupEntry = {
 	glossary: string[];
 	score: number;
 	sequence: number | null;
+	surfaceForm?: string;
+	dictionaryForm?: string;
+	deinflectionReasons?: string[];
+	deinflectionRules?: string[];
 };
 
 export type DictionaryLookupResult = {

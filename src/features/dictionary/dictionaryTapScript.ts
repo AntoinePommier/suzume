@@ -74,22 +74,132 @@ export const dictionaryTapScript = `
 		return text.replace(/\\s+/g, "");
 	}
 
+	function hasExcludedTextAncestor(node) {
+		let current = node && node.parentElement;
+
+		while (current) {
+			const tagName = current.tagName ? current.tagName.toLowerCase() : "";
+
+			if (
+				tagName === "rt" ||
+				tagName === "rp" ||
+				tagName === "script" ||
+				tagName === "style"
+			) {
+				return true;
+			}
+
+			current = current.parentElement;
+		}
+
+		return false;
+	}
+
+	function getVisibleTextNodes(doc) {
+		const root = doc.body || doc.documentElement;
+
+		if (!root) {
+			return [];
+		}
+
+		const nodeFilter = doc.defaultView ? doc.defaultView.NodeFilter : NodeFilter;
+		const walker = doc.createTreeWalker(
+			root,
+			nodeFilter.SHOW_TEXT,
+			{
+				acceptNode(node) {
+					if (hasExcludedTextAncestor(node)) {
+						return nodeFilter.FILTER_REJECT;
+					}
+
+					return cleanContextText(node.textContent || "")
+						? nodeFilter.FILTER_ACCEPT
+						: nodeFilter.FILTER_REJECT;
+				}
+			}
+		);
+		const nodes = [];
+		let node = walker.nextNode();
+
+		while (node) {
+			nodes.push(node);
+			node = walker.nextNode();
+		}
+
+		return nodes;
+	}
+
+	function takeLastCharacters(text, maxLength) {
+		return Array.from(text).slice(-maxLength).join("");
+	}
+
+	function takeFirstCharacters(text, maxLength) {
+		return Array.from(text).slice(0, maxLength).join("");
+	}
+
+	function buildBeforeFromVisibleTextNodes(visibleTextNodes, nodeIndex, utf16Offset) {
+		let before = cleanContextText(
+			(visibleTextNodes[nodeIndex].textContent || "").slice(0, utf16Offset)
+		);
+
+		for (
+			let index = nodeIndex - 1;
+			index >= 0 && Array.from(before).length < contextRadius;
+			index -= 1
+		) {
+			before = cleanContextText(visibleTextNodes[index].textContent || "") + before;
+		}
+
+		return takeLastCharacters(before, contextRadius);
+	}
+
+	function buildAfterFromVisibleTextNodes(visibleTextNodes, nodeIndex, utf16Offset) {
+		let after = cleanContextText(
+			(visibleTextNodes[nodeIndex].textContent || "").slice(utf16Offset)
+		);
+		const maxAfterLength = contextRadius + 1;
+
+		for (
+			let index = nodeIndex + 1;
+			index < visibleTextNodes.length && Array.from(after).length < maxAfterLength;
+			index += 1
+		) {
+			after += cleanContextText(visibleTextNodes[index].textContent || "");
+		}
+
+		return takeFirstCharacters(after, maxAfterLength);
+	}
+
 	function buildDictionaryPayload(node, utf16Offset) {
-		const text = cleanContextText(node.textContent || "");
 		const rawText = node.textContent || "";
-		const rawPrefix = rawText.slice(0, utf16Offset);
-		const unicodeIndex = Array.from(cleanContextText(rawPrefix)).length;
-		const characters = Array.from(text);
-		const character = characters[unicodeIndex] || "";
+		const character = getUnicodeCharacterAtUtf16Offset(rawText, utf16Offset);
 
 		if (!isDictionaryCharacter(character)) {
 			return null;
 		}
 
-		const beforeStart = Math.max(0, unicodeIndex - contextRadius);
-		const afterEnd = Math.min(characters.length, unicodeIndex + contextRadius + 1);
-		const before = characters.slice(beforeStart, unicodeIndex).join("");
-		const after = characters.slice(unicodeIndex, afterEnd).join("");
+		if (hasExcludedTextAncestor(node)) {
+			return null;
+		}
+
+		const doc = node.ownerDocument || document;
+		const visibleTextNodes = getVisibleTextNodes(doc);
+		const nodeIndex = visibleTextNodes.indexOf(node);
+
+		if (nodeIndex < 0) {
+			return null;
+		}
+
+		const before = buildBeforeFromVisibleTextNodes(
+			visibleTextNodes,
+			nodeIndex,
+			utf16Offset
+		);
+		const after = buildAfterFromVisibleTextNodes(
+			visibleTextNodes,
+			nodeIndex,
+			utf16Offset
+		);
 
 		return {
 			character,
@@ -154,7 +264,17 @@ export const dictionaryTapScript = `
 		}
 
 		const nodeFilter = doc.defaultView ? doc.defaultView.NodeFilter : NodeFilter;
-		const walker = doc.createTreeWalker(element, nodeFilter.SHOW_TEXT);
+		const walker = doc.createTreeWalker(
+			element,
+			nodeFilter.SHOW_TEXT,
+			{
+				acceptNode(node) {
+					return hasExcludedTextAncestor(node)
+						? nodeFilter.FILTER_REJECT
+						: nodeFilter.FILTER_ACCEPT;
+				}
+			}
+		);
 		const nodes = [];
 		let node = walker.nextNode();
 
