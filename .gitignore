@@ -43,3 +43,4 @@ app-example
 /android
 assets/dictionaries/*.zip
 assets/dictionaries/*.sqlite
+assets/books/*.epub
