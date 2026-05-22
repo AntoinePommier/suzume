@@ -13,6 +13,7 @@
   "dependencies": {
     "@epubjs-react-native/core": "^1.4.7",
     "@epubjs-react-native/expo-file-system": "^1.1.4",
+    "@gorhom/bottom-sheet": "^5.2.14",
     "@react-navigation/bottom-tabs": "^7.15.5",
     "@react-navigation/elements": "^2.9.10",
     "@react-navigation/native": "^7.1.33",

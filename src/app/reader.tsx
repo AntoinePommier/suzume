@@ -1,4 +1,9 @@
 import { getBookById } from "@/books";
+import {
+	DictionaryBottomSheet,
+	dictionaryTapScript,
+	type DictionaryBridgeMessage,
+} from "@/features/dictionary";
 import { Reader } from "@epubjs-react-native/core";
 import jszipSource from "@epubjs-react-native/core/lib/module/jszip";
 import { Asset } from "expo-asset";
@@ -292,13 +297,41 @@ export default function ReaderScreen() {
 	const selectedBook = getBookById(bookId);
 	const [bookUri, setBookUri] = useState<string | null>(null);
 	const [bookError, setBookError] = useState<string | null>(null);
+	const [dictionarySelection, setDictionarySelection] = useState<string | null>(
+		null,
+	);
 	const [readingDirection, setReadingDirection] =
 		useState<ReadingDirection>("ltr");
+	const injectedReaderJavascript =
+		readingDirection === "rtl"
+			? `${rtlSwipeScript}\n${dictionaryTapScript}`
+			: dictionaryTapScript;
+
+	const handleWebViewMessage = useCallback(
+		(message: DictionaryBridgeMessage | { type?: string }) => {
+			if (message.type === "dictionary-close") {
+				setDictionarySelection(null);
+				return;
+			}
+
+			if (
+				message.type !== "dictionary-tap" ||
+				!("payload" in message) ||
+				!message.payload.text
+			) {
+				return;
+			}
+
+			setDictionarySelection(message.payload.text);
+		},
+		[],
+	);
 
 	useEffect(() => {
 		let isMounted = true;
 		setBookUri(null);
 		setBookError(null);
+		setDictionarySelection(null);
 		setReadingDirection("ltr");
 
 		async function loadBook() {
@@ -368,9 +401,8 @@ export default function ReaderScreen() {
 						flow="paginated"
 						enableSwipe={readingDirection === "ltr"}
 						defaultTheme={readerTheme}
-						injectedJavascript={
-							readingDirection === "rtl" ? rtlSwipeScript : undefined
-						}
+						injectedJavascript={injectedReaderJavascript}
+						onWebViewMessage={handleWebViewMessage}
 					/>
 				</View>
 			) : (
@@ -386,6 +418,11 @@ export default function ReaderScreen() {
 					</Text>
 				</View>
 			)}
+
+			<DictionaryBottomSheet
+				text={dictionarySelection}
+				onDismiss={() => setDictionarySelection(null)}
+			/>
 		</View>
 	);
 }
