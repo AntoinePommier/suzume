@@ -2,7 +2,9 @@ import { getBookById } from "@/books";
 import {
 	DictionaryBottomSheet,
 	dictionaryTapScript,
+	lookupJapaneseTermFromSqlite,
 	type DictionaryBridgeMessage,
+	type DictionaryLookupResult,
 	type DictionarySelection,
 } from "@/features/dictionary";
 import { Reader } from "@epubjs-react-native/core";
@@ -10,7 +12,7 @@ import jszipSource from "@epubjs-react-native/core/lib/module/jszip";
 import { Asset } from "expo-asset";
 import * as ExpoFileSystem from "expo-file-system/legacy";
 import { router, useLocalSearchParams } from "expo-router";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 
 const readerTheme = {
@@ -300,17 +302,48 @@ export default function ReaderScreen() {
 	const [bookError, setBookError] = useState<string | null>(null);
 	const [dictionarySelection, setDictionarySelection] =
 		useState<DictionarySelection | null>(null);
+	const [dictionaryLookupResult, setDictionaryLookupResult] =
+		useState<DictionaryLookupResult | null>(null);
 	const [readingDirection, setReadingDirection] =
 		useState<ReadingDirection>("ltr");
+	const dictionaryLookupRequestId = useRef(0);
 	const injectedReaderJavascript =
 		readingDirection === "rtl"
 			? `${rtlSwipeScript}\n${dictionaryTapScript}`
 			: dictionaryTapScript;
 
+	const runDictionaryLookup = useCallback(async (selection: DictionarySelection) => {
+		const requestId = dictionaryLookupRequestId.current + 1;
+		dictionaryLookupRequestId.current = requestId;
+
+		try {
+			const result = await lookupJapaneseTermFromSqlite(selection.after);
+
+			if (dictionaryLookupRequestId.current === requestId) {
+				setDictionaryLookupResult(result);
+			}
+		} catch {
+			if (dictionaryLookupRequestId.current === requestId) {
+				setDictionaryLookupResult({
+					status: "error",
+					matchedText: "",
+					entries: [],
+					error: "Dictionary unavailable",
+				});
+			}
+		}
+	}, []);
+
+	const closeDictionary = useCallback(() => {
+		dictionaryLookupRequestId.current += 1;
+		setDictionarySelection(null);
+		setDictionaryLookupResult(null);
+	}, []);
+
 	const handleWebViewMessage = useCallback(
 		(message: DictionaryBridgeMessage | { type?: string }) => {
 			if (message.type === "dictionary-close") {
-				setDictionarySelection(null);
+				closeDictionary();
 				return;
 			}
 
@@ -323,15 +356,21 @@ export default function ReaderScreen() {
 			}
 
 			setDictionarySelection(message.payload);
+			setDictionaryLookupResult({
+				status: "not-installed",
+				matchedText: "",
+				entries: [],
+			});
+			runDictionaryLookup(message.payload);
 		},
-		[],
+		[closeDictionary, runDictionaryLookup],
 	);
 
 	useEffect(() => {
 		let isMounted = true;
 		setBookUri(null);
 		setBookError(null);
-		setDictionarySelection(null);
+		closeDictionary();
 		setReadingDirection("ltr");
 
 		async function loadBook() {
@@ -371,7 +410,7 @@ export default function ReaderScreen() {
 		return () => {
 			isMounted = false;
 		};
-	}, [selectedBook.asset]);
+	}, [closeDictionary, selectedBook.asset]);
 
 	return (
 		<View style={{ flex: 1, backgroundColor: "#111111" }}>
@@ -421,7 +460,8 @@ export default function ReaderScreen() {
 
 			<DictionaryBottomSheet
 				selection={dictionarySelection}
-				onDismiss={() => setDictionarySelection(null)}
+				lookupResult={dictionaryLookupResult}
+				onDismiss={closeDictionary}
 			/>
 		</View>
 	);

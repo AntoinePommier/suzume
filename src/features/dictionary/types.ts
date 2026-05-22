@@ -17,3 +17,57 @@ export type DictionaryCloseMessage = {
 export type DictionaryBridgeMessage =
 	| DictionaryTapMessage
 	| DictionaryCloseMessage;
+
+export type YomitanDictionaryIndex = {
+	title?: string;
+	author?: string;
+	revision?: string;
+	format?: number;
+	url?: string;
+	sourceLanguage?: string;
+	targetLanguage?: string;
+	description?: string;
+	attribution?: string;
+};
+
+export type YomitanTermBankEntry = [
+	expression: string,
+	reading: string,
+	definitionTags: string,
+	rules: string,
+	score: number,
+	glossary: unknown[],
+	sequence?: number,
+	termTags?: string,
+];
+
+export type DictionaryImportProgress = {
+	phase: "checking" | "loading-zip" | "parsing-index" | "importing-terms" | "complete";
+	dictionaryTitle?: string;
+	banksImported?: number;
+	totalBanks?: number;
+	termsImported?: number;
+};
+
+export type DictionaryImportResult = {
+	dictionaryId: number;
+	title: string;
+	revision: string | null;
+	termsImported: number;
+	skipped: boolean;
+};
+
+export type DictionaryLookupEntry = {
+	expression: string;
+	reading: string;
+	glossary: string[];
+	score: number;
+	sequence: number | null;
+};
+
+export type DictionaryLookupResult = {
+	status: "ready" | "not-installed" | "error";
+	matchedText: string;
+	entries: DictionaryLookupEntry[];
+	error?: string;
+};
