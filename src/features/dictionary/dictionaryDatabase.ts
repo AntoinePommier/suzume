@@ -141,7 +141,5 @@ export function getBundledJitendexDatabase() {
 }
 
 function getBundledJitendexSqliteAssetModule(): number | null {
-	// Wire this to require("../../../assets/dictionaries/jitendex.sqlite")
-	// once the prebuilt SQLite asset is generated and committed locally.
-	return null;
+	return require("../../../assets/dictionaries/jitendex.sqlite");
 }

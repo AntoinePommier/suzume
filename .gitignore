@@ -42,3 +42,4 @@ app-example
 /ios
 /android
 assets/dictionaries/*.zip
+assets/dictionaries/*.sqlite
