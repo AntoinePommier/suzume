@@ -1010,6 +1010,32 @@ export default function ReaderScreen() {
 						onWebViewMessage={handleWebViewMessage}
 					/>
 
+					<View
+						pointerEvents="none"
+						style={{
+							position: "absolute",
+							top: 60,
+							alignSelf: "center",
+							maxWidth: "58%",
+							paddingHorizontal: 10,
+							paddingVertical: 4,
+						}}
+					>
+						<Text
+							numberOfLines={1}
+							ellipsizeMode="tail"
+							style={{
+								color: currentReaderTheme.text,
+								fontSize: 12,
+								fontWeight: "500",
+								opacity: 0.45,
+								textAlign: "center",
+							}}
+						>
+							{selectedBook.title}
+						</Text>
+					</View>
+
 					{renderedPageIndicator ? (
 						<Pressable
 							onPress={showRenderedPageTotalTemporarily}
