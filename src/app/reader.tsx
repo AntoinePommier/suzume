@@ -1,11 +1,11 @@
 import { getBookById } from "@/books";
 import {
 	DictionaryBottomSheet,
-	dictionaryTapScript,
-	lookupJapaneseTermFromSqlite,
 	type DictionaryBridgeMessage,
 	type DictionaryLookupResult,
 	type DictionarySelection,
+	dictionaryTapScript,
+	lookupJapaneseTermFromSqlite,
 } from "@/features/dictionary";
 import { Reader } from "@epubjs-react-native/core";
 import jszipSource from "@epubjs-react-native/core/lib/module/jszip";
@@ -15,16 +15,26 @@ import { router, useLocalSearchParams } from "expo-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Pressable, Text, View } from "react-native";
 
+const currentReaderTheme = {
+	background: "#F1E2C9",
+	text: "#111111",
+};
+
 const readerTheme = {
+	html: {
+		background: `${currentReaderTheme.background} !important`,
+		"-webkit-text-size-adjust": "100% !important",
+		"text-size-adjust": "100% !important",
+	},
 	body: {
-		background: "#f8f5ee !important",
-		color: "#111111 !important",
-	},
-	p: {
-		color: "#111111 !important",
-	},
-	span: {
-		color: "#111111 !important",
+		background: currentReaderTheme.background,
+		"background-color": `${currentReaderTheme.background} !important`,
+		color: `${currentReaderTheme.text} !important`,
+		"font-size": "20px !important",
+		"line-height": "1.75 !important",
+		margin: "0 !important",
+		padding: "16px 22px !important",
+		"box-sizing": "border-box !important",
 	},
 };
 
@@ -128,6 +138,67 @@ async function detectReadingDirection(
 
 	return primaryWritingMode === "vertical-rl" ? "rtl" : "ltr";
 }
+
+const readerBackgroundScript = `
+(() => {
+	const readerBackground = ${JSON.stringify(currentReaderTheme.background)};
+
+	function applyDocumentBackground(document) {
+		if (!document) {
+			return;
+		}
+
+		const root = document.documentElement;
+		const body = document.body;
+		const viewer = document.getElementById("viewer");
+
+		if (root) {
+			root.style.setProperty("background-color", readerBackground, "important");
+		}
+
+		if (body) {
+			body.style.setProperty("background-color", readerBackground, "important");
+		}
+
+		if (viewer) {
+			viewer.style.setProperty("background-color", readerBackground, "important");
+		}
+	}
+
+	function applyContentBackground(contents) {
+		if (!contents || !contents.document) {
+			return;
+		}
+
+		applyDocumentBackground(contents.document);
+	}
+
+	function applyAllBackgrounds() {
+		applyDocumentBackground(document);
+
+		if (typeof rendition === "undefined" || !rendition.getContents) {
+			return;
+		}
+
+		rendition.getContents().forEach(applyContentBackground);
+	}
+
+	if (typeof rendition !== "undefined") {
+		if (rendition.hooks && rendition.hooks.content) {
+			rendition.hooks.content.register((contents) => {
+				applyContentBackground(contents);
+			});
+		}
+
+		rendition.on("rendered", applyAllBackgrounds);
+		rendition.on("relocated", applyAllBackgrounds);
+		rendition.on("resized", applyAllBackgrounds);
+	}
+
+	applyAllBackgrounds();
+})();
+true;
+`;
 
 const rtlSwipeScript = `
 (() => {
@@ -327,30 +398,33 @@ export default function ReaderScreen() {
 	const currentReaderLocationKey = useRef<string | null>(null);
 	const injectedReaderJavascript =
 		readingDirection === "rtl"
-			? `${rtlSwipeScript}\n${dictionaryTapScript}`
-			: dictionaryTapScript;
+			? `${readerBackgroundScript}\n${rtlSwipeScript}\n${dictionaryTapScript}`
+			: `${readerBackgroundScript}\n${dictionaryTapScript}`;
 
-	const runDictionaryLookup = useCallback(async (selection: DictionarySelection) => {
-		const requestId = dictionaryLookupRequestId.current + 1;
-		dictionaryLookupRequestId.current = requestId;
+	const runDictionaryLookup = useCallback(
+		async (selection: DictionarySelection) => {
+			const requestId = dictionaryLookupRequestId.current + 1;
+			dictionaryLookupRequestId.current = requestId;
 
-		try {
-			const result = await lookupJapaneseTermFromSqlite(selection.after);
+			try {
+				const result = await lookupJapaneseTermFromSqlite(selection.after);
 
-			if (dictionaryLookupRequestId.current === requestId) {
-				setDictionaryLookupResult(result);
+				if (dictionaryLookupRequestId.current === requestId) {
+					setDictionaryLookupResult(result);
+				}
+			} catch {
+				if (dictionaryLookupRequestId.current === requestId) {
+					setDictionaryLookupResult({
+						status: "error",
+						matchedText: "",
+						entries: [],
+						error: "Dictionary unavailable",
+					});
+				}
 			}
-		} catch {
-			if (dictionaryLookupRequestId.current === requestId) {
-				setDictionaryLookupResult({
-					status: "error",
-					matchedText: "",
-					entries: [],
-					error: "Dictionary unavailable",
-				});
-			}
-		}
-	}, []);
+		},
+		[],
+	);
 
 	const closeDictionary = useCallback(() => {
 		dictionaryLookupRequestId.current += 1;
@@ -359,10 +433,7 @@ export default function ReaderScreen() {
 	}, []);
 
 	const handleLocationChange = useCallback(
-		(
-			_totalLocations: number,
-			currentLocation: ReaderLocation,
-		) => {
+		(_totalLocations: number, currentLocation: ReaderLocation) => {
 			const locationKey = [
 				currentLocation?.start?.cfi,
 				currentLocation?.end?.cfi,
@@ -491,7 +562,8 @@ export default function ReaderScreen() {
 				<View
 					style={{
 						flex: 1,
-						paddingTop: 120,
+						backgroundColor: currentReaderTheme.background,
+						paddingTop: 100,
 						paddingBottom: 48,
 					}}
 				>
@@ -499,8 +571,30 @@ export default function ReaderScreen() {
 						src={bookUri}
 						fileSystem={useLegacyFileSystem}
 						flow="paginated"
+						spread="none"
 						enableSwipe={readingDirection === "ltr"}
 						defaultTheme={readerTheme}
+						renderLoadingFileComponent={() => (
+							<View
+								style={{
+									flex: 1,
+									backgroundColor: currentReaderTheme.background,
+								}}
+							/>
+						)}
+						renderOpeningBookComponent={() => (
+							<View
+								style={{
+									flex: 1,
+									backgroundColor: currentReaderTheme.background,
+								}}
+							/>
+						)}
+						openingBookComponentContainerStyle={{
+							width: "100%",
+							height: "100%",
+							backgroundColor: currentReaderTheme.background,
+						}}
 						injectedJavascript={injectedReaderJavascript}
 						onLocationChange={handleLocationChange}
 						onWebViewMessage={handleWebViewMessage}
