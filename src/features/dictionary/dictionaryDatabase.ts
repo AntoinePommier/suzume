@@ -93,17 +93,33 @@ async function copyBundledSqliteAssetIfNeeded(
 	databaseFileName: string,
 ) {
 	const destinationUri = `${ExpoFileSystem.documentDirectory}${databaseFileName}`;
-	const destinationInfo = await ExpoFileSystem.getInfoAsync(destinationUri);
-
-	if (destinationInfo.exists) {
-		return;
-	}
-
 	const asset = Asset.fromModule(assetModule);
 	await asset.downloadAsync();
 
 	if (!asset.localUri) {
 		throw new Error("Bundled dictionary database asset was not downloaded");
+	}
+
+	const [destinationInfo, assetInfo] = await Promise.all([
+		ExpoFileSystem.getInfoAsync(destinationUri),
+		ExpoFileSystem.getInfoAsync(asset.localUri),
+	]);
+	const destinationSize =
+		destinationInfo.exists && "size" in destinationInfo
+			? destinationInfo.size
+			: null;
+	const assetSize = assetInfo.exists && "size" in assetInfo ? assetInfo.size : null;
+
+	if (
+		destinationInfo.exists &&
+		assetSize !== null &&
+		destinationSize === assetSize
+	) {
+		return;
+	}
+
+	if (destinationInfo.exists) {
+		await ExpoFileSystem.deleteAsync(destinationUri, { idempotent: true });
 	}
 
 	await ExpoFileSystem.copyAsync({

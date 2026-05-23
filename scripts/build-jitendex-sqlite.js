@@ -56,6 +56,14 @@ function normalizeGlossaryText(value) {
 	return String(value).replace(/\s+/g, " ").trim();
 }
 
+function asArray(value) {
+	if (value === undefined || value === null) {
+		return [];
+	}
+
+	return Array.isArray(value) ? value : [value];
+}
+
 function collectGlossaryText(value, parts) {
 	if (typeof value === "string") {
 		const text = normalizeGlossaryText(value);
@@ -93,15 +101,162 @@ function collectGlossaryText(value, parts) {
 	}
 }
 
+function shouldSkipDisplayNode(value) {
+	if (!value || typeof value !== "object") {
+		return false;
+	}
+
+	const dataContent = String(value.data?.content || "");
+
+	return (
+		dataContent === "attribution" ||
+		dataContent === "extra-info" ||
+		dataContent === "forms" ||
+		dataContent === "example" ||
+		dataContent === "examples" ||
+		dataContent === "sentence" ||
+		dataContent === "sentences" ||
+		dataContent === "note" ||
+		dataContent === "notes"
+	);
+}
+
+function collectGlossarySenseParts(value, parts) {
+	if (typeof value === "string") {
+		const text = normalizeGlossaryText(value);
+
+		if (text) {
+			parts.push(text);
+		}
+
+		return;
+	}
+
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			collectGlossarySenseParts(item, parts);
+		}
+
+		return;
+	}
+
+	if (!value || typeof value !== "object" || shouldSkipDisplayNode(value)) {
+		return;
+	}
+
+	if ("content" in value) {
+		collectGlossarySenseParts(value.content, parts);
+	}
+
+	if ("text" in value) {
+		collectGlossarySenseParts(value.text, parts);
+	}
+}
+
+function collectGlossarySenseText(value) {
+	const parts = [];
+	collectGlossarySenseParts(value, parts);
+
+	return normalizeGlossaryText([...new Set(parts)].join("; "));
+}
+
+function isGlossaryNode(value, contentName) {
+	if (!value || typeof value !== "object") {
+		return false;
+	}
+
+	const dataContent = String(value.data?.content || "");
+	const dataClass = String(value.data?.class || "");
+
+	if (dataContent === contentName) {
+		return true;
+	}
+
+	return (
+		contentName === "glossary-brief" &&
+		(dataContent.includes("glossary-brief") ||
+			dataContent.includes("brief-glossary") ||
+			dataClass.includes("glossary-brief") ||
+			dataClass.includes("brief-glossary"))
+	);
+}
+
+function collectGlossaryItems(
+	value,
+	glosses,
+	contentName,
+	isInsideGlossary = false,
+) {
+	if (typeof value === "string") {
+		const text = isInsideGlossary ? normalizeGlossaryText(value) : "";
+
+		if (text) {
+			glosses.push(text);
+		}
+
+		return;
+	}
+
+	if (Array.isArray(value)) {
+		for (const item of value) {
+			collectGlossaryItems(item, glosses, contentName, isInsideGlossary);
+		}
+
+		return;
+	}
+
+	if (!value || typeof value !== "object") {
+		return;
+	}
+
+	if (isGlossaryNode(value, contentName)) {
+		const text = collectGlossarySenseText(value.content);
+
+		if (text) {
+			glosses.push(text);
+		}
+
+		return;
+	}
+
+	for (const item of asArray(value.content)) {
+		if (shouldSkipDisplayNode(item)) {
+			continue;
+		}
+
+		collectGlossaryItems(item, glosses, contentName, isInsideGlossary);
+	}
+}
+
+function collectGlossesByContentName(items, contentName) {
+	const glosses = [];
+
+	for (const item of items) {
+		collectGlossaryItems(item, glosses, contentName);
+	}
+
+	return [...new Set(glosses)];
+}
+
 function extractGlosses(glossary) {
 	const items = Array.isArray(glossary) ? glossary : [glossary];
+	const briefGlosses = collectGlossesByContentName(items, "glossary-brief");
+
+	if (briefGlosses.length > 0) {
+		return briefGlosses;
+	}
+
+	const glosses = collectGlossesByContentName(items, "glossary");
+
+	if (glosses.length > 0) {
+		return glosses;
+	}
 
 	return items
-		.map((item) => {
+		.flatMap((item) => {
 			const parts = [];
 			collectGlossaryText(item, parts);
-
-			return normalizeGlossaryText(parts.join(" "));
+			return [normalizeGlossaryText(parts.join(" "))];
 		})
 		.filter(Boolean);
 }

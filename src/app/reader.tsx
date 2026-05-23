@@ -30,7 +30,24 @@ const readerTheme = {
 
 type ReadingDirection = "ltr" | "rtl";
 
+type ReaderLocation = {
+	start?: {
+		cfi?: string;
+		href?: string;
+		index?: number;
+	};
+	end?: {
+		cfi?: string;
+	};
+};
+
 let JSZipConstructor: any;
+
+const idleDictionaryLookupResult: DictionaryLookupResult = {
+	status: "idle",
+	matchedText: "",
+	entries: [],
+};
 
 function getJSZipConstructor() {
 	if (JSZipConstructor) {
@@ -303,10 +320,11 @@ export default function ReaderScreen() {
 	const [dictionarySelection, setDictionarySelection] =
 		useState<DictionarySelection | null>(null);
 	const [dictionaryLookupResult, setDictionaryLookupResult] =
-		useState<DictionaryLookupResult | null>(null);
+		useState<DictionaryLookupResult>(idleDictionaryLookupResult);
 	const [readingDirection, setReadingDirection] =
 		useState<ReadingDirection>("ltr");
 	const dictionaryLookupRequestId = useRef(0);
+	const currentReaderLocationKey = useRef<string | null>(null);
 	const injectedReaderJavascript =
 		readingDirection === "rtl"
 			? `${rtlSwipeScript}\n${dictionaryTapScript}`
@@ -337,8 +355,38 @@ export default function ReaderScreen() {
 	const closeDictionary = useCallback(() => {
 		dictionaryLookupRequestId.current += 1;
 		setDictionarySelection(null);
-		setDictionaryLookupResult(null);
+		setDictionaryLookupResult(idleDictionaryLookupResult);
 	}, []);
+
+	const handleLocationChange = useCallback(
+		(
+			_totalLocations: number,
+			currentLocation: ReaderLocation,
+		) => {
+			const locationKey = [
+				currentLocation?.start?.cfi,
+				currentLocation?.end?.cfi,
+				currentLocation?.start?.href,
+				currentLocation?.start?.index,
+			]
+				.filter((value) => value !== undefined && value !== null)
+				.join("|");
+
+			if (!locationKey) {
+				return;
+			}
+
+			if (
+				currentReaderLocationKey.current &&
+				currentReaderLocationKey.current !== locationKey
+			) {
+				closeDictionary();
+			}
+
+			currentReaderLocationKey.current = locationKey;
+		},
+		[closeDictionary],
+	);
 
 	const handleWebViewMessage = useCallback(
 		(message: DictionaryBridgeMessage | { type?: string }) => {
@@ -356,10 +404,22 @@ export default function ReaderScreen() {
 			}
 
 			setDictionarySelection(message.payload);
-			setDictionaryLookupResult({
-				status: "not-installed",
-				matchedText: "",
-				entries: [],
+			setDictionaryLookupResult((currentResult) => {
+				if (
+					currentResult?.status === "results" ||
+					currentResult?.status === "loading"
+				) {
+					return {
+						...currentResult,
+						status: "loading",
+					};
+				}
+
+				return {
+					status: "loading",
+					matchedText: "",
+					entries: [],
+				};
 			});
 			runDictionaryLookup(message.payload);
 		},
@@ -371,6 +431,7 @@ export default function ReaderScreen() {
 		setBookUri(null);
 		setBookError(null);
 		closeDictionary();
+		currentReaderLocationKey.current = null;
 		setReadingDirection("ltr");
 
 		async function loadBook() {
@@ -441,6 +502,7 @@ export default function ReaderScreen() {
 						enableSwipe={readingDirection === "ltr"}
 						defaultTheme={readerTheme}
 						injectedJavascript={injectedReaderJavascript}
+						onLocationChange={handleLocationChange}
 						onWebViewMessage={handleWebViewMessage}
 					/>
 				</View>

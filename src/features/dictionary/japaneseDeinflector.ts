@@ -233,6 +233,32 @@ function applySuruSuffixRules(records: DeinflectionRecord[]) {
 	}
 }
 
+function applyClassicalShiIchidanRule(records: DeinflectionRecord[]) {
+	const initialSize = records.length;
+
+	for (let index = 0; index < initialSize; index += 1) {
+		const record = records[index];
+
+		if (!record.dictionaryForm.endsWith("し")) {
+			continue;
+		}
+
+		const dictionaryForm = `${record.dictionaryForm.slice(0, -1)}る`;
+
+		if (!hasIchidanStemEnding(dictionaryForm)) {
+			continue;
+		}
+
+		pushUnique(records, {
+			surfaceForm: record.surfaceForm,
+			dictionaryForm,
+			reasons: ["classical-past", ...record.reasons],
+			rules: ["ichidan-classical-shi", ...record.rules],
+			inflectionType: japaneseInflectionTypes.ICHIDAN,
+		});
+	}
+}
+
 function hasBogusEnding(word: string) {
 	return japaneseDeinflectionRules.bogus.some((ending) => word.endsWith(ending));
 }
@@ -258,6 +284,7 @@ export function deinflectJapaneseTerm(source: string): JapaneseDeinflection[] {
 	applyRegularRules(records, "godan", japaneseInflectionTypes.GODAN, false);
 
 	applySuruSuffixRules(records);
+	applyClassicalShiIchidanRule(records);
 	applyIrregularRules(records, "kuru", japaneseInflectionTypes.KURU);
 	applyIrregularRules(records, "special", japaneseInflectionTypes.SPECIAL);
 	applyIrregularRules(records, "iku", japaneseInflectionTypes.IKU);

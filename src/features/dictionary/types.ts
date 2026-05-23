@@ -70,7 +70,13 @@ export type DictionaryLookupEntry = {
 };
 
 export type DictionaryLookupResult = {
-	status: "ready" | "not-installed" | "error";
+	status:
+		| "idle"
+		| "loading"
+		| "results"
+		| "noResults"
+		| "notInstalled"
+		| "error";
 	matchedText: string;
 	entries: DictionaryLookupEntry[];
 	error?: string;

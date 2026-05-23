@@ -14,8 +14,21 @@ function normalizeLookupSource(text: string) {
 	return Array.from(text.replace(/\s+/g, "")).slice(0, maxLookupLength);
 }
 
+function isSingleKanjiExpression(text: string) {
+	return Array.from(text).length === 1 && /^[\u3400-\u9fff]$/.test(text);
+}
+
 type LookupCandidate = JapaneseDeinflection & {
 	order: number;
+};
+
+type RankedMatch = {
+	row: DictionaryTermRow;
+	order: number;
+	surfaceLength: number;
+	dictionaryLength: number;
+	isExactSurface: boolean;
+	isKanjiOnlyEntry: boolean;
 };
 
 type DictionaryTermRow = {
@@ -156,22 +169,43 @@ async function queryCandidates(
 			const order =
 				expressionOrder !== undefined && readingOrder !== undefined
 					? Math.min(expressionOrder, readingOrder)
-					: (expressionOrder ?? readingOrder);
+				: (expressionOrder ?? readingOrder);
 
-			return order === undefined ? null : { row, order };
+			const candidate =
+				candidatesByTerm.get(row.expression) ??
+				candidatesByTerm.get(row.reading ?? "");
+
+			return order === undefined || !candidate
+				? null
+				: {
+						row,
+						order,
+						surfaceLength: Array.from(candidate.surfaceForm).length,
+						dictionaryLength: Array.from(candidate.dictionaryForm).length,
+						isExactSurface:
+							row.expression === candidate.surfaceForm ||
+							row.reading === candidate.surfaceForm,
+						isKanjiOnlyEntry:
+							(row.score !== null && row.score < 0) ||
+							isSingleKanjiExpression(row.expression),
+					};
 		})
-		.filter((item): item is { row: DictionaryTermRow; order: number } =>
-			Boolean(item),
-		);
+		.filter((item): item is RankedMatch => Boolean(item));
 
 	if (matchingRows.length === 0) {
 		return [];
 	}
 
-	const bestOrder = Math.min(...matchingRows.map((item) => item.order));
 	const bestRows = matchingRows
-		.filter((item) => item.order === bestOrder)
-		.sort((a, b) => (b.row.score ?? 0) - (a.row.score ?? 0))
+		.sort(
+			(a, b) =>
+				Number(a.isKanjiOnlyEntry) - Number(b.isKanjiOnlyEntry) ||
+				Number(b.isExactSurface) - Number(a.isExactSurface) ||
+				(b.row.score ?? 0) - (a.row.score ?? 0) ||
+				a.surfaceLength - b.surfaceLength ||
+				b.dictionaryLength - a.dictionaryLength ||
+				a.order - b.order,
+		)
 		.slice(0, maxEntries)
 		.map((item) => item.row);
 	const glossesByTermId = await loadGlossesForTerms(db, bestRows);
@@ -224,7 +258,7 @@ export async function lookupJapaneseTermFromSqlite(
 
 	if (!db) {
 		return {
-			status: "not-installed",
+			status: "notInstalled",
 			matchedText: "",
 			entries: [],
 		};
@@ -236,14 +270,14 @@ export async function lookupJapaneseTermFromSqlite(
 
 	if (fallbackEntries.length > 0) {
 		return {
-			status: "ready",
+			status: "results",
 			matchedText: fallbackEntries[0].surfaceForm ?? fallbackEntries[0].expression,
 			entries: fallbackEntries,
 		};
 	}
 
 	return {
-		status: "ready",
+		status: "noResults",
 		matchedText: "",
 		entries: [],
 	};
