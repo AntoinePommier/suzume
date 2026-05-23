@@ -25,6 +25,12 @@ export const dictionaryTapScript = `
 		});
 	}
 
+	function postReaderBackgroundTap() {
+		postDictionaryMessage({
+			type: "reader-background-tap"
+		});
+	}
+
 	function getRangeFromPoint(doc, x, y) {
 		if (doc.caretRangeFromPoint) {
 			return doc.caretRangeFromPoint(x, y);
@@ -256,6 +262,33 @@ export const dictionaryTapScript = `
 		return null;
 	}
 
+	function hasTextCharacterAtPointInTextNode(doc, node, x, y) {
+		const text = node.textContent || "";
+		const characters = Array.from(text);
+		let utf16Offset = 0;
+
+		for (const character of characters) {
+			const nextOffset = utf16Offset + character.length;
+
+			if (!/\\s/.test(character)) {
+				const range = doc.createRange();
+				range.setStart(node, utf16Offset);
+				range.setEnd(node, nextOffset);
+
+				const rects = Array.from(range.getClientRects());
+				range.detach && range.detach();
+
+				if (rects.some((rect) => rectContainsPoint(rect, x, y))) {
+					return true;
+				}
+			}
+
+			utf16Offset = nextOffset;
+		}
+
+		return false;
+	}
+
 	function getTextNodesUnderPoint(doc, x, y) {
 		const element = doc.elementFromPoint(x, y);
 
@@ -298,6 +331,18 @@ export const dictionaryTapScript = `
 		}
 
 		return null;
+	}
+
+	function hasTextCharacterAtPoint(doc, x, y) {
+		const nodes = getTextNodesUnderPoint(doc, x, y);
+
+		for (const node of nodes) {
+			if (hasTextCharacterAtPointInTextNode(doc, node, x, y)) {
+				return true;
+			}
+		}
+
+		return false;
 	}
 
 	function getDictionaryPayloadFromPoint(doc, x, y) {
@@ -348,8 +393,10 @@ export const dictionaryTapScript = `
 
 			if (payload) {
 				postDictionaryTap(payload);
-			} else {
+			} else if (hasTextCharacterAtPoint(doc, touch.clientX, touch.clientY)) {
 				postDictionaryClose();
+			} else {
+				postReaderBackgroundTap();
 			}
 		}, { passive: true });
 	}

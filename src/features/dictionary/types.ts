@@ -14,9 +14,14 @@ export type DictionaryCloseMessage = {
 	type: "dictionary-close";
 };
 
+export type ReaderBackgroundTapMessage = {
+	type: "reader-background-tap";
+};
+
 export type DictionaryBridgeMessage =
 	| DictionaryTapMessage
-	| DictionaryCloseMessage;
+	| DictionaryCloseMessage
+	| ReaderBackgroundTapMessage;
 
 export type YomitanDictionaryIndex = {
 	title?: string;

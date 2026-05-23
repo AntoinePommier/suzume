@@ -13,12 +13,16 @@ import { Asset } from "expo-asset";
 import * as ExpoFileSystem from "expo-file-system/legacy";
 import { router, useLocalSearchParams } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Pressable, Text, View } from "react-native";
+import { Animated, Easing, Pressable, Text, View } from "react-native";
 
 const currentReaderTheme = {
 	background: "#F1E2C9",
 	text: "#111111",
 };
+
+const readerControlFadeDuration = 180;
+const readerContentPaddingTop = 100;
+const readerContentPaddingBottom = 48;
 
 const readerTheme = {
 	html: {
@@ -676,12 +680,12 @@ export default function ReaderScreen() {
 		useState<ReaderLocation | null>(null);
 	const [renderedPagination, setRenderedPagination] =
 		useState<RenderedPaginationState>({ status: "idle" });
-	const [showRenderedPageTotal, setShowRenderedPageTotal] = useState(false);
+	const [readerControlsVisible, setReaderControlsVisible] = useState(false);
+	const [pageIndicatorExpanded, setPageIndicatorExpanded] = useState(false);
 	const dictionaryLookupRequestId = useRef(0);
 	const currentReaderLocationKey = useRef<string | null>(null);
-	const renderedPageTotalTimer = useRef<ReturnType<typeof setTimeout> | null>(
-		null,
-	);
+	const readerControlsAnimation = useRef(new Animated.Value(0)).current;
+	const pageIndicatorOpacity = useRef(new Animated.Value(1)).current;
 	const injectedReaderJavascript =
 		readingDirection === "rtl"
 			? `${readerBackgroundScript}\n${rtlSwipeScript}\n${dictionaryTapScript}\n${renderedPaginationScript}`
@@ -720,6 +724,13 @@ export default function ReaderScreen() {
 		};
 	}, [currentReaderLocation, renderedPagination]);
 
+	const readerControlsAnimatedStyle = useMemo(
+		() => ({
+			opacity: readerControlsAnimation,
+		}),
+		[readerControlsAnimation],
+	);
+
 	const runDictionaryLookup = useCallback(
 		async (selection: DictionarySelection) => {
 			const requestId = dictionaryLookupRequestId.current + 1;
@@ -751,18 +762,52 @@ export default function ReaderScreen() {
 		setDictionaryLookupResult(idleDictionaryLookupResult);
 	}, []);
 
-	const showRenderedPageTotalTemporarily = useCallback(() => {
-		setShowRenderedPageTotal(true);
-
-		if (renderedPageTotalTimer.current) {
-			clearTimeout(renderedPageTotalTimer.current);
+	const handleReaderBackgroundTap = useCallback(() => {
+		if (dictionarySelection) {
+			closeDictionary();
+			return;
 		}
 
-		renderedPageTotalTimer.current = setTimeout(() => {
-			setShowRenderedPageTotal(false);
-			renderedPageTotalTimer.current = null;
-		}, 1800);
-	}, []);
+		setReaderControlsVisible((isVisible) => !isVisible);
+	}, [closeDictionary, dictionarySelection]);
+
+	useEffect(() => {
+		Animated.timing(readerControlsAnimation, {
+			toValue: readerControlsVisible ? 1 : 0,
+			duration: readerControlFadeDuration,
+			easing: Easing.out(Easing.cubic),
+			useNativeDriver: true,
+		}).start();
+	}, [readerControlsAnimation, readerControlsVisible]);
+
+	useEffect(() => {
+		let isCancelled = false;
+
+		Animated.timing(pageIndicatorOpacity, {
+			toValue: 0,
+			duration: readerControlFadeDuration,
+			easing: Easing.out(Easing.cubic),
+			useNativeDriver: true,
+		}).start(() => {
+			if (isCancelled) {
+				return;
+			}
+
+			setPageIndicatorExpanded(readerControlsVisible);
+
+			Animated.timing(pageIndicatorOpacity, {
+				toValue: 1,
+				duration: readerControlFadeDuration,
+				easing: Easing.out(Easing.cubic),
+				useNativeDriver: true,
+			}).start();
+		});
+
+		return () => {
+			isCancelled = true;
+			pageIndicatorOpacity.stopAnimation();
+		};
+	}, [pageIndicatorOpacity, readerControlsVisible]);
 
 	const handleLocationChange = useCallback(
 		(_totalLocations: number, currentLocation: ReaderLocation) => {
@@ -785,6 +830,7 @@ export default function ReaderScreen() {
 				currentReaderLocationKey.current &&
 				currentReaderLocationKey.current !== locationKey
 			) {
+				setReaderControlsVisible(false);
 				closeDictionary();
 			}
 
@@ -865,6 +911,11 @@ export default function ReaderScreen() {
 				return;
 			}
 
+			if (message.type === "reader-background-tap") {
+				handleReaderBackgroundTap();
+				return;
+			}
+
 			if (
 				message.type !== "dictionary-tap" ||
 				!("payload" in message) ||
@@ -873,6 +924,7 @@ export default function ReaderScreen() {
 				return;
 			}
 
+			setReaderControlsVisible(false);
 			setDictionarySelection(message.payload);
 			setDictionaryLookupResult((currentResult) => {
 				if (
@@ -893,7 +945,7 @@ export default function ReaderScreen() {
 			});
 			runDictionaryLookup(message.payload);
 		},
-		[closeDictionary, runDictionaryLookup],
+		[closeDictionary, handleReaderBackgroundTap, runDictionaryLookup],
 	);
 
 	useEffect(() => {
@@ -903,7 +955,8 @@ export default function ReaderScreen() {
 		closeDictionary();
 		setCurrentReaderLocation(null);
 		setRenderedPagination({ status: "idle" });
-		setShowRenderedPageTotal(false);
+		setReaderControlsVisible(false);
+		setPageIndicatorExpanded(false);
 		currentReaderLocationKey.current = null;
 		setReadingDirection("ltr");
 
@@ -946,37 +999,98 @@ export default function ReaderScreen() {
 		};
 	}, [closeDictionary, selectedBook.asset]);
 
-	useEffect(() => {
-		return () => {
-			if (renderedPageTotalTimer.current) {
-				clearTimeout(renderedPageTotalTimer.current);
-			}
-		};
-	}, []);
-
 	return (
 		<View style={{ flex: 1, backgroundColor: "#111111" }}>
-			<Pressable
-				onPress={() => router.back()}
-				style={{
-					position: "absolute",
-					top: 60,
-					left: 24,
-					zIndex: 10,
-				}}
+			<Animated.View
+				pointerEvents={readerControlsVisible ? "auto" : "none"}
+				style={[
+					{
+						position: "absolute",
+						top: 54,
+						left: 20,
+						width: 44,
+						height: 44,
+						borderRadius: 22,
+						zIndex: 10,
+					},
+					readerControlsAnimatedStyle,
+				]}
 			>
-				<Text style={{ color: "white", fontSize: 18 }}>← Books</Text>
-			</Pressable>
+				<Pressable
+					onPress={() => router.back()}
+					hitSlop={10}
+					style={{
+						width: 44,
+						height: 44,
+						borderRadius: 22,
+						overflow: "hidden",
+						zIndex: 10,
+					}}
+				>
+					<View
+						style={{
+							width: 44,
+							height: 44,
+							borderRadius: 22,
+							alignItems: "center",
+							justifyContent: "center",
+							backgroundColor: "rgba(255, 255, 255, 0.55)",
+							borderWidth: 1,
+							borderColor: "rgba(255, 255, 255, 0.75)",
+							shadowColor: "#000000",
+							shadowOffset: { width: 0, height: 6 },
+							shadowOpacity: 0.12,
+							shadowRadius: 16,
+							elevation: 4,
+						}}
+					>
+						<Text
+							style={{
+								color: currentReaderTheme.text,
+								fontSize: 30,
+								fontWeight: "400",
+								lineHeight: 34,
+								marginTop: -2,
+							}}
+						>
+							‹
+						</Text>
+					</View>
+				</Pressable>
+			</Animated.View>
 
 			{bookUri ? (
 				<View
 					style={{
 						flex: 1,
 						backgroundColor: currentReaderTheme.background,
-						paddingTop: 100,
-						paddingBottom: 48,
+						paddingTop: readerContentPaddingTop,
+						paddingBottom: readerContentPaddingBottom,
 					}}
 				>
+					<Pressable
+						onPress={handleReaderBackgroundTap}
+						style={{
+							position: "absolute",
+							top: 0,
+							left: 0,
+							right: 0,
+							height: readerContentPaddingTop,
+							zIndex: 1,
+						}}
+					/>
+					<Pressable
+						onPress={handleReaderBackgroundTap}
+						style={{
+							position: "absolute",
+							left: 0,
+							right: 0,
+							bottom: 0,
+							height: readerContentPaddingBottom,
+							zIndex: 1,
+						}}
+					/>
+
 					<Reader
 						src={bookUri}
 						fileSystem={useLegacyFileSystem}
@@ -1037,15 +1151,15 @@ export default function ReaderScreen() {
 					</View>
 
 					{renderedPageIndicator ? (
-						<Pressable
-							onPress={showRenderedPageTotalTemporarily}
-							hitSlop={12}
+						<Animated.View
+							pointerEvents="none"
 							style={{
 								position: "absolute",
 								bottom: 18,
 								alignSelf: "center",
 								paddingHorizontal: 10,
 								paddingVertical: 4,
+								opacity: pageIndicatorOpacity,
 							}}
 						>
 							<Text
@@ -1056,11 +1170,11 @@ export default function ReaderScreen() {
 									opacity: 0.45,
 								}}
 							>
-								{showRenderedPageTotal
+								{pageIndicatorExpanded
 									? `${renderedPageIndicator.currentPage} sur ${renderedPageIndicator.totalPages}`
 									: renderedPageIndicator.currentPage}
 							</Text>
-						</Pressable>
+						</Animated.View>
 					) : null}
 				</View>
 			) : (
