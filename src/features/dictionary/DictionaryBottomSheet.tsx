@@ -6,7 +6,16 @@ import {
 	useMemo,
 	useRef,
 } from "react";
-import { StyleSheet, Text, useWindowDimensions, View } from "react-native";
+import {
+	type GestureResponderEvent,
+	type NativeScrollEvent,
+	type NativeSyntheticEvent,
+	StyleSheet,
+	Text,
+	useWindowDimensions,
+	View,
+} from "react-native";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import type {
 	DictionaryLookupEntry,
@@ -29,20 +38,9 @@ type DictionaryResultRow = {
 	key: string;
 };
 
-const initialMaxScreenRatio = 0.45;
-const expandedScreenRatio = 0.95;
-const minSheetHeight = 132;
-const handleHeight = 28;
-const verticalContentPadding = 44;
-const statusTextHeight = 30;
-const entryVerticalPadding = 26;
-const readingHeight = 16;
-const expressionHeight = 32;
-const glossaryTopMargin = 5;
-const glossaryLineHeight = 18;
-const glossaryRowGap = 1;
-const entryBorderHeight = 1;
-const glossaryHorizontalChrome = 47;
+const openScreenRatio = 0.6;
+const topPullCloseDistance = 36;
+const topSafeMargin = 12;
 
 function isKana(character: string) {
 	return /^[\u3040-\u30ffー]$/.test(character);
@@ -101,90 +99,11 @@ function getDictionaryResultRows(entries: DictionaryLookupEntry[]) {
 	});
 }
 
-function estimateGlossaryHeight(glossary: string, availableWidth: number) {
-	const estimatedCharacterWidth = 7;
-	const charactersPerLine = Math.max(
-		18,
-		Math.floor(availableWidth / estimatedCharacterWidth),
-	);
-	const lineCount = Math.max(
-		1,
-		Math.ceil(Array.from(glossary).length / charactersPerLine),
-	);
+function createSnapPoints(screenHeight: number, topInset: number) {
+	const openHeight = Math.round(screenHeight * openScreenRatio);
+	const safeOpenHeight = Math.round(screenHeight - topInset - topSafeMargin);
 
-	return lineCount * glossaryLineHeight;
-}
-
-function estimateEntryHeight(
-	entry: DictionaryLookupEntry,
-	availableWidth: number,
-) {
-	const glosses = entry.glossary.filter(Boolean);
-	const glossaryHeight = glosses.reduce(
-		(total, glossary) =>
-			total + estimateGlossaryHeight(glossary, availableWidth),
-		0,
-	);
-	const glossaryGaps = Math.max(0, glosses.length - 1) * glossaryRowGap;
-	const hasReading = Boolean(
-		entry.reading && entry.reading !== entry.expression,
-	);
-
-	return (
-		entryVerticalPadding +
-		entryBorderHeight +
-		(hasReading ? readingHeight : 0) +
-		expressionHeight +
-		(glosses.length > 0 ? glossaryTopMargin + glossaryHeight + glossaryGaps : 0)
-	);
-}
-
-function estimateContentHeight(
-	lookupResult: DictionaryLookupResult | null,
-	screenWidth: number,
-) {
-	const hasDisplayEntries =
-		lookupResult?.status === "results" ||
-		(lookupResult?.status === "loading" && lookupResult.entries.length > 0);
-
-	if (!lookupResult || !hasDisplayEntries) {
-		return handleHeight + verticalContentPadding + statusTextHeight;
-	}
-
-	const availableGlossaryWidth = Math.max(
-		180,
-		screenWidth -
-			styles.content.paddingHorizontal * 2 -
-			glossaryHorizontalChrome,
-	);
-
-	return (
-		handleHeight +
-		verticalContentPadding +
-		lookupResult.entries.reduce(
-			(total, entry) =>
-				total + estimateEntryHeight(entry, availableGlossaryWidth),
-			0,
-		)
-	);
-}
-
-function createSnapPoints(
-	lookupResult: DictionaryLookupResult | null,
-	screenWidth: number,
-	screenHeight: number,
-) {
-	const maxInitialHeight = Math.round(screenHeight * initialMaxScreenRatio);
-	const expandedHeight = Math.round(screenHeight * expandedScreenRatio);
-	const estimatedHeight = estimateContentHeight(lookupResult, screenWidth);
-	const contentHeight = Math.min(
-		expandedHeight,
-		Math.max(minSheetHeight, Math.ceil(estimatedHeight)),
-	);
-	const initialHeight =
-		contentHeight <= maxInitialHeight ? contentHeight : maxInitialHeight;
-
-	return [initialHeight, Math.max(initialHeight + 1, expandedHeight)];
+	return [Math.min(openHeight, safeOpenHeight)];
 }
 
 function DictionaryResultItem({ entry }: DictionaryResultItemProps) {
@@ -223,13 +142,18 @@ export function DictionaryBottomSheet({
 	const isOpenRef = useRef(false);
 	const isProgrammaticCloseRef = useRef(false);
 	const isProgrammaticSnapRef = useRef(false);
+	const currentSheetIndexRef = useRef(-1);
+	const scrollOffsetYRef = useRef(0);
+	const topPullStartYRef = useRef<number | null>(null);
+	const topPullTriggeredRef = useRef(false);
 	const selectionRef = useRef(selection);
-	const { height, width } = useWindowDimensions();
+	const { height } = useWindowDimensions();
+	const { top } = useSafeAreaInsets();
 	const snapPoints = useMemo(
-		() => createSnapPoints(lookupResult, width, height),
-		[height, lookupResult, width],
+		() => createSnapPoints(height, top),
+		[height, top],
 	);
-	const initialSnapPoint = snapPoints[0];
+	const openSnapPoint = snapPoints[0];
 	const shouldDisplayEntries =
 		lookupResult?.status === "results" ||
 		(lookupResult?.status === "loading" && lookupResult.entries.length > 0);
@@ -241,6 +165,8 @@ export function DictionaryBottomSheet({
 
 	const handleSheetChange = useCallback(
 		(index: number) => {
+			currentSheetIndexRef.current = index;
+
 			if (index >= 0) {
 				isOpenRef.current = true;
 				isProgrammaticCloseRef.current = false;
@@ -265,13 +191,49 @@ export function DictionaryBottomSheet({
 		[onDismiss],
 	);
 
+	const handleContentScroll = useCallback(
+		(event: NativeSyntheticEvent<NativeScrollEvent>) => {
+			scrollOffsetYRef.current = Math.max(0, event.nativeEvent.contentOffset.y);
+		},
+		[],
+	);
+
+	const handleContentTouchStart = useCallback(
+		(event: GestureResponderEvent) => {
+			topPullStartYRef.current = event.nativeEvent.pageY;
+			topPullTriggeredRef.current = false;
+		},
+		[],
+	);
+
+	const handleContentTouchMove = useCallback((event: GestureResponderEvent) => {
+		const startY = topPullStartYRef.current;
+
+		if (startY === null || topPullTriggeredRef.current) {
+			return;
+		}
+
+		const deltaY = event.nativeEvent.pageY - startY;
+		const isAtTop = scrollOffsetYRef.current <= 1;
+
+		if (isAtTop && deltaY >= topPullCloseDistance) {
+			topPullTriggeredRef.current = true;
+			bottomSheetRef.current?.close();
+		}
+	}, []);
+
+	const handleContentTouchEnd = useCallback(() => {
+		topPullStartYRef.current = null;
+		topPullTriggeredRef.current = false;
+	}, []);
+
 	useEffect(() => {
 		selectionRef.current = selection;
 	}, [selection]);
 
 	useLayoutEffect(() => {
 		if (selection) {
-			if (initialSnapPoint <= 0) {
+			if (openSnapPoint <= 0) {
 				return;
 			}
 
@@ -282,7 +244,7 @@ export function DictionaryBottomSheet({
 
 		isProgrammaticCloseRef.current = true;
 		bottomSheetRef.current?.close();
-	}, [initialSnapPoint, selection]);
+	}, [openSnapPoint, selection]);
 
 	return (
 		<BottomSheet
@@ -290,14 +252,23 @@ export function DictionaryBottomSheet({
 			index={-1}
 			snapPoints={snapPoints}
 			enableDynamicSizing={false}
+			enableContentPanningGesture={false}
+			enableHandlePanningGesture={true}
 			enablePanDownToClose
 			onChange={handleSheetChange}
+			topInset={top}
 			backgroundStyle={styles.background}
+			handleStyle={styles.handle}
 			handleIndicatorStyle={styles.handleIndicator}
 		>
 			<BottomSheetScrollView
 				contentContainerStyle={styles.content}
 				showsVerticalScrollIndicator={false}
+				onScroll={handleContentScroll}
+				onTouchStart={handleContentTouchStart}
+				onTouchMove={handleContentTouchMove}
+				onTouchEnd={handleContentTouchEnd}
+				onTouchCancel={handleContentTouchEnd}
 			>
 				{lookupResult?.status === "loading" && resultRows.length === 0 ? (
 					<Text style={styles.mutedText}>Preparing dictionary...</Text>
@@ -334,6 +305,10 @@ const styles = StyleSheet.create({
 	handleIndicator: {
 		width: 40,
 		backgroundColor: "#c8c8c8",
+	},
+	handle: {
+		paddingTop: 14,
+		paddingBottom: 14,
 	},
 	content: {
 		paddingHorizontal: 20,
