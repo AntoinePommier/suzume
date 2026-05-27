@@ -1,3 +1,7 @@
+import { Reader } from "@epubjs-react-native/core";
+import { router, useLocalSearchParams } from "expo-router";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Animated, Pressable, Text, View } from "react-native";
 import { getBookById } from "@/books";
 import {
 	DictionaryBottomSheet,
@@ -8,17 +12,17 @@ import {
 	lookupJapaneseTermFromSqlite,
 } from "@/features/dictionary";
 import {
-	currentReaderTheme,
-	readerContentPaddingBottom,
-	readerContentPaddingTop,
-	readerTheme,
-} from "@/features/reader/readerTheme";
-import {
 	useBookAsset,
 	useLegacyFileSystem,
 } from "@/features/reader/hooks/useBookAsset";
 import { useReaderControls } from "@/features/reader/hooks/useReaderControls";
 import { useRenderedPagination } from "@/features/reader/hooks/useRenderedPagination";
+import {
+	currentReaderTheme,
+	readerContentPaddingBottom,
+	readerContentPaddingTop,
+	readerTheme,
+} from "@/features/reader/readerTheme";
 import { createReaderBackgroundScript } from "@/features/reader/scripts/readerBackgroundScript";
 import { createRenderedPaginationScript } from "@/features/reader/scripts/renderedPaginationScript";
 import { rtlSwipeScript } from "@/features/reader/scripts/rtlSwipeScript";
@@ -26,10 +30,6 @@ import type {
 	ReaderLocation,
 	RenderedPaginationMessage,
 } from "@/features/reader/types";
-import { Reader } from "@epubjs-react-native/core";
-import { router, useLocalSearchParams } from "expo-router";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Animated, Pressable, Text, View } from "react-native";
 
 const idleDictionaryLookupResult: DictionaryLookupResult = {
 	status: "idle",
@@ -51,6 +51,9 @@ export default function ReaderScreen() {
 		useState<ReaderLocation | null>(null);
 	const dictionaryLookupRequestId = useRef(0);
 	const currentReaderLocationKey = useRef<string | null>(null);
+	const injectReaderJavascript = useRef<((script: string) => void) | null>(
+		null,
+	);
 	const {
 		readerControlsVisible,
 		setReaderControlsVisible,
@@ -76,6 +79,35 @@ export default function ReaderScreen() {
 		readingDirection === "rtl"
 			? `${readerBackgroundScript}\n${rtlSwipeScript}\n${dictionaryTapScript}\n${renderedPaginationScript}`
 			: `${readerBackgroundScript}\n${dictionaryTapScript}\n${renderedPaginationScript}`;
+	const handleInjectionJavascriptFn = useCallback(
+		(injectJavascript: (script: string) => void) => {
+			injectReaderJavascript.current = injectJavascript;
+		},
+		[],
+	);
+	const runReaderJavascript = useCallback((script: string) => {
+		injectReaderJavascript.current?.(`${script}\ntrue;`);
+	}, []);
+	const clearDictionaryHighlight = useCallback(() => {
+		runReaderJavascript(`
+			window.__suzumeClearDictionaryHighlight &&
+				window.__suzumeClearDictionaryHighlight();
+		`);
+	}, [runReaderJavascript]);
+	const highlightDictionaryMatch = useCallback(
+		(matchedText: string) => {
+			if (!matchedText) {
+				clearDictionaryHighlight();
+				return;
+			}
+
+			runReaderJavascript(`
+				window.__suzumeHighlightDictionaryMatch &&
+					window.__suzumeHighlightDictionaryMatch(${JSON.stringify(matchedText)});
+			`);
+		},
+		[clearDictionaryHighlight, runReaderJavascript],
+	);
 
 	const runDictionaryLookup = useCallback(
 		async (selection: DictionarySelection) => {
@@ -87,6 +119,12 @@ export default function ReaderScreen() {
 
 				if (dictionaryLookupRequestId.current === requestId) {
 					setDictionaryLookupResult(result);
+
+					if (result.status === "results") {
+						highlightDictionaryMatch(result.matchedText);
+					} else {
+						clearDictionaryHighlight();
+					}
 				}
 			} catch {
 				if (dictionaryLookupRequestId.current === requestId) {
@@ -96,17 +134,19 @@ export default function ReaderScreen() {
 						entries: [],
 						error: "Dictionary unavailable",
 					});
+					clearDictionaryHighlight();
 				}
 			}
 		},
-		[],
+		[clearDictionaryHighlight, highlightDictionaryMatch],
 	);
 
 	const closeDictionary = useCallback(() => {
 		dictionaryLookupRequestId.current += 1;
 		setDictionarySelection(null);
 		setDictionaryLookupResult(idleDictionaryLookupResult);
-	}, []);
+		clearDictionaryHighlight();
+	}, [clearDictionaryHighlight]);
 
 	const handleReaderBackgroundTap = useCallback(() => {
 		if (dictionarySelection) {
@@ -346,6 +386,7 @@ export default function ReaderScreen() {
 							backgroundColor: currentReaderTheme.background,
 						}}
 						injectedJavascript={injectedReaderJavascript}
+						getInjectionJavascriptFn={handleInjectionJavascriptFn}
 						onLocationChange={handleLocationChange}
 						onWebViewMessage={handleWebViewMessage}
 					/>

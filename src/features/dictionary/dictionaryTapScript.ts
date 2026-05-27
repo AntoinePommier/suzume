@@ -31,6 +31,87 @@ export const dictionaryTapScript = `
 		});
 	}
 
+	function getHighlightDocuments() {
+		const docs = [document];
+
+		if (typeof rendition !== "undefined" && rendition.getContents) {
+			for (const content of rendition.getContents()) {
+				if (content && content.document && !docs.includes(content.document)) {
+					docs.push(content.document);
+				}
+			}
+		}
+
+		return docs;
+	}
+
+	function ensureDictionaryHighlightStyle(doc) {
+		if (!doc || doc.getElementById("suzume-dictionary-highlight-style")) {
+			return;
+		}
+
+		const style = doc.createElement("style");
+		style.id = "suzume-dictionary-highlight-style";
+		style.textContent = [
+			".suzume-dictionary-highlight {",
+			"background-color: rgba(90, 70, 40, 0.14);",
+			"box-shadow: 0 0 0 1px rgba(90, 70, 40, 0.14);",
+			"border-radius: 2px;",
+			"-webkit-box-decoration-break: clone;",
+			"box-decoration-break: clone;",
+			"}"
+		].join("");
+
+		(doc.head || doc.documentElement).appendChild(style);
+	}
+
+	function unwrapDictionaryHighlight(highlight) {
+		const parent = highlight.parentNode;
+
+		if (!parent) {
+			return;
+		}
+
+		while (highlight.firstChild) {
+			parent.insertBefore(highlight.firstChild, highlight);
+		}
+
+		parent.removeChild(highlight);
+		parent.normalize && parent.normalize();
+	}
+
+	function clearDictionaryHighlightInDocument(doc, options) {
+		if (!doc) {
+			return;
+		}
+
+		const highlights = Array.from(
+			doc.querySelectorAll(".suzume-dictionary-highlight")
+		);
+
+		for (const highlight of highlights) {
+			unwrapDictionaryHighlight(highlight);
+		}
+
+		if (!options || options.clearAnchor !== false) {
+			doc.__suzumeDictionaryHighlightAnchor = null;
+		}
+	}
+
+	function clearDictionaryHighlights() {
+		for (const doc of getHighlightDocuments()) {
+			clearDictionaryHighlightInDocument(doc);
+		}
+	}
+
+	function clearDictionaryHighlightSpans() {
+		for (const doc of getHighlightDocuments()) {
+			clearDictionaryHighlightInDocument(doc, { clearAnchor: false });
+		}
+	}
+
+	window.__suzumeClearDictionaryHighlight = clearDictionaryHighlights;
+
 	function getRangeFromPoint(doc, x, y) {
 		if (doc.caretRangeFromPoint) {
 			return doc.caretRangeFromPoint(x, y);
@@ -196,6 +277,11 @@ export const dictionaryTapScript = `
 			return null;
 		}
 
+		doc.__suzumeDictionaryHighlightAnchor = {
+			node,
+			utf16Offset
+		};
+
 		const before = buildBeforeFromVisibleTextNodes(
 			visibleTextNodes,
 			nodeIndex,
@@ -214,6 +300,126 @@ export const dictionaryTapScript = `
 			context: before + after
 		};
 	}
+
+	function collectHighlightSegments(
+		visibleTextNodes,
+		nodeIndex,
+		utf16Offset,
+		surfaceLength
+	) {
+		const segments = [];
+		let remaining = surfaceLength;
+
+		for (
+			let index = nodeIndex;
+			index < visibleTextNodes.length && remaining > 0;
+			index += 1
+		) {
+			const node = visibleTextNodes[index];
+			const text = node.textContent || "";
+			const characters = Array.from(text);
+			let currentUtf16Offset = 0;
+			let segmentStart = null;
+			let segmentEnd = null;
+
+			for (const character of characters) {
+				const nextUtf16Offset = currentUtf16Offset + character.length;
+				const isBeforeStart =
+					index === nodeIndex && nextUtf16Offset <= utf16Offset;
+
+				if (!isBeforeStart && remaining > 0) {
+					if (segmentStart === null) {
+						segmentStart = Math.max(currentUtf16Offset, utf16Offset);
+					}
+
+					segmentEnd = nextUtf16Offset;
+
+					if (!/\\s/.test(character)) {
+						remaining -= 1;
+					}
+				}
+
+				currentUtf16Offset = nextUtf16Offset;
+
+				if (remaining <= 0) {
+					break;
+				}
+			}
+
+			if (
+				segmentStart !== null &&
+				segmentEnd !== null &&
+				segmentEnd > segmentStart
+			) {
+				segments.push({
+					node,
+					start: segmentStart,
+					end: segmentEnd
+				});
+			}
+		}
+
+		return remaining === 0 ? segments : [];
+	}
+
+	function wrapHighlightSegment(doc, segment) {
+		const range = doc.createRange();
+		range.setStart(segment.node, segment.start);
+		range.setEnd(segment.node, segment.end);
+
+		const highlight = doc.createElement("span");
+		highlight.className = "suzume-dictionary-highlight";
+		highlight.setAttribute("data-suzume-dictionary-highlight", "true");
+		highlight.appendChild(range.extractContents());
+		range.insertNode(highlight);
+		range.detach && range.detach();
+	}
+
+	function highlightDictionarySurface(surfaceText) {
+		const matchedText = cleanContextText(surfaceText || "");
+
+		clearDictionaryHighlightSpans();
+
+		if (!matchedText) {
+			return;
+		}
+
+		for (const doc of getHighlightDocuments()) {
+			const anchor = doc.__suzumeDictionaryHighlightAnchor;
+
+			if (!anchor || !anchor.node || !anchor.node.isConnected) {
+				continue;
+			}
+
+			const visibleTextNodes = getVisibleTextNodes(doc);
+			const nodeIndex = visibleTextNodes.indexOf(anchor.node);
+
+			if (nodeIndex < 0) {
+				continue;
+			}
+
+			const segments = collectHighlightSegments(
+				visibleTextNodes,
+				nodeIndex,
+				anchor.utf16Offset,
+				Array.from(matchedText).length
+			);
+
+			if (segments.length === 0) {
+				continue;
+			}
+
+			ensureDictionaryHighlightStyle(doc);
+
+			for (let index = segments.length - 1; index >= 0; index -= 1) {
+				wrapHighlightSegment(doc, segments[index]);
+			}
+
+			return;
+		}
+	}
+
+	window.__suzumeHighlightDictionaryMatch = highlightDictionarySurface;
 
 	function getDictionaryPayloadFromCaret(doc, x, y) {
 		const range = getRangeFromPoint(doc, x, y);
@@ -388,6 +594,8 @@ export const dictionaryTapScript = `
 			if (Math.abs(deltaX) > maxTapMovement || Math.abs(deltaY) > maxTapMovement) {
 				return;
 			}
+
+			clearDictionaryHighlights();
 
 			const payload = getDictionaryPayloadFromPoint(doc, touch.clientX, touch.clientY);
 
