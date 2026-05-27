@@ -11,27 +11,25 @@ import {
 	currentReaderTheme,
 	readerContentPaddingBottom,
 	readerContentPaddingTop,
-	readerControlFadeDuration,
 	readerTheme,
 } from "@/features/reader/readerTheme";
+import {
+	useBookAsset,
+	useLegacyFileSystem,
+} from "@/features/reader/hooks/useBookAsset";
+import { useReaderControls } from "@/features/reader/hooks/useReaderControls";
+import { useRenderedPagination } from "@/features/reader/hooks/useRenderedPagination";
 import { createReaderBackgroundScript } from "@/features/reader/scripts/readerBackgroundScript";
 import { createRenderedPaginationScript } from "@/features/reader/scripts/renderedPaginationScript";
 import { rtlSwipeScript } from "@/features/reader/scripts/rtlSwipeScript";
 import type {
 	ReaderLocation,
-	ReadingDirection,
 	RenderedPaginationMessage,
-	RenderedPaginationState,
 } from "@/features/reader/types";
 import { Reader } from "@epubjs-react-native/core";
-import jszipSource from "@epubjs-react-native/core/lib/module/jszip";
-import { Asset } from "expo-asset";
-import * as ExpoFileSystem from "expo-file-system/legacy";
 import { router, useLocalSearchParams } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Animated, Easing, Pressable, Text, View } from "react-native";
-
-let JSZipConstructor: any;
+import { Animated, Pressable, Text, View } from "react-native";
 
 const idleDictionaryLookupResult: DictionaryLookupResult = {
 	status: "idle",
@@ -39,188 +37,33 @@ const idleDictionaryLookupResult: DictionaryLookupResult = {
 	entries: [],
 };
 
-function getJSZipConstructor() {
-	if (JSZipConstructor) {
-		return JSZipConstructor;
-	}
-
-	const scope: { JSZip?: any } = {};
-	const source =
-		typeof jszipSource === "string"
-			? jszipSource
-			: (jszipSource as { default?: string }).default;
-
-	if (!source) {
-		throw new Error("Unable to load EPUB metadata parser source");
-	}
-
-	const createJSZip = new Function(
-		"scope",
-		`
-			var window = scope;
-			var global = scope;
-			var self = scope;
-			var module = { exports: undefined };
-			var exports = module.exports;
-
-			${source}
-
-			return module.exports || scope.JSZip;
-		`,
-	);
-
-	JSZipConstructor = createJSZip(scope);
-
-	if (!JSZipConstructor) {
-		throw new Error("Unable to initialize EPUB metadata parser");
-	}
-
-	return JSZipConstructor;
-}
-
-async function detectReadingDirection(
-	bookBase64: string,
-): Promise<ReadingDirection> {
-	const JSZip = getJSZipConstructor();
-	const zip = await JSZip.loadAsync(bookBase64, { base64: true });
-	const container = await zip.file("META-INF/container.xml")?.async("text");
-	const opfPath = container?.match(
-		/<rootfile\b[^>]*\bfull-path=["']([^"']+)/i,
-	)?.[1];
-
-	if (!opfPath) {
-		return "ltr";
-	}
-
-	const opf = await zip.file(opfPath)?.async("text");
-
-	if (!opf) {
-		return "ltr";
-	}
-
-	const pageProgressionDirection = opf
-		.match(/<spine\b[^>]*\bpage-progression-direction=["']([^"']+)/i)?.[1]
-		?.toLowerCase();
-
-	if (pageProgressionDirection === "rtl") {
-		return "rtl";
-	}
-
-	if (pageProgressionDirection === "ltr") {
-		return "ltr";
-	}
-
-	const primaryWritingMode = opf
-		.match(
-			/<meta\b[^>]*\bname=["']primary-writing-mode["'][^>]*\bcontent=["']([^"']+)/i,
-		)?.[1]
-		?.toLowerCase();
-
-	return primaryWritingMode === "vertical-rl" ? "rtl" : "ltr";
-}
-
-function useLegacyFileSystem() {
-	const [file, setFile] = useState<string | null>(null);
-	const [progress, setProgress] = useState(0);
-	const [downloading, setDownloading] = useState(false);
-	const [size, setSize] = useState(0);
-	const [error, setError] = useState<string | null>(null);
-	const [success, setSuccess] = useState(false);
-
-	const downloadFile = useCallback((fromUrl: string, toFile: string) => {
-		const downloadResumable = ExpoFileSystem.createDownloadResumable(
-			fromUrl,
-			`${ExpoFileSystem.documentDirectory}${toFile}`,
-			{ cache: true },
-			(downloadProgress) => {
-				const expectedBytes = downloadProgress.totalBytesExpectedToWrite;
-
-				if (expectedBytes > 0) {
-					setProgress(
-						Math.round(
-							(downloadProgress.totalBytesWritten / expectedBytes) * 100,
-						),
-					);
-				}
-			},
-		);
-
-		setDownloading(true);
-
-		return downloadResumable
-			.downloadAsync()
-			.then((value) => {
-				if (!value) {
-					throw new Error("Download failed");
-				}
-
-				if (value.headers["Content-Length"]) {
-					setSize(Number(value.headers["Content-Length"]));
-				}
-
-				setSuccess(true);
-				setError(null);
-				setFile(value.uri);
-
-				return { uri: value.uri, mimeType: value.mimeType ?? null };
-			})
-			.catch((err: unknown) => {
-				setError(err instanceof Error ? err.message : "Error downloading file");
-				return { uri: null, mimeType: null };
-			})
-			.finally(() => setDownloading(false));
-	}, []);
-
-	const getFileInfo = useCallback(async (fileUri: string) => {
-		const info = await ExpoFileSystem.getInfoAsync(fileUri);
-
-		return {
-			uri: info.uri,
-			exists: info.exists,
-			isDirectory: info.exists ? info.isDirectory : false,
-			size: info.exists ? info.size : undefined,
-		};
-	}, []);
-
-	return {
-		file,
-		progress,
-		downloading,
-		size,
-		error,
-		success,
-		documentDirectory: ExpoFileSystem.documentDirectory,
-		cacheDirectory: ExpoFileSystem.cacheDirectory,
-		bundleDirectory: ExpoFileSystem.bundleDirectory ?? undefined,
-		readAsStringAsync: ExpoFileSystem.readAsStringAsync,
-		writeAsStringAsync: ExpoFileSystem.writeAsStringAsync,
-		deleteAsync: ExpoFileSystem.deleteAsync,
-		downloadFile,
-		getFileInfo,
-	};
-}
-
 export default function ReaderScreen() {
 	const { bookId } = useLocalSearchParams<{ bookId?: string }>();
 	const selectedBook = getBookById(bookId);
-	const [bookUri, setBookUri] = useState<string | null>(null);
-	const [bookError, setBookError] = useState<string | null>(null);
+	const { bookUri, bookError, readingDirection } = useBookAsset(
+		selectedBook.asset,
+	);
 	const [dictionarySelection, setDictionarySelection] =
 		useState<DictionarySelection | null>(null);
 	const [dictionaryLookupResult, setDictionaryLookupResult] =
 		useState<DictionaryLookupResult>(idleDictionaryLookupResult);
-	const [readingDirection, setReadingDirection] =
-		useState<ReadingDirection>("ltr");
 	const [currentReaderLocation, setCurrentReaderLocation] =
 		useState<ReaderLocation | null>(null);
-	const [renderedPagination, setRenderedPagination] =
-		useState<RenderedPaginationState>({ status: "idle" });
-	const [readerControlsVisible, setReaderControlsVisible] = useState(false);
-	const [pageIndicatorExpanded, setPageIndicatorExpanded] = useState(false);
 	const dictionaryLookupRequestId = useRef(0);
 	const currentReaderLocationKey = useRef<string | null>(null);
-	const readerControlsAnimation = useRef(new Animated.Value(0)).current;
-	const pageIndicatorOpacity = useRef(new Animated.Value(1)).current;
+	const {
+		readerControlsVisible,
+		setReaderControlsVisible,
+		pageIndicatorExpanded,
+		setPageIndicatorExpanded,
+		pageIndicatorOpacity,
+		readerControlsAnimatedStyle,
+	} = useReaderControls();
+	const {
+		renderedPageIndicator,
+		setRenderedPagination,
+		handleRenderedPaginationMessage,
+	} = useRenderedPagination(currentReaderLocation);
 	const readerBackgroundScript = useMemo(
 		() => createReaderBackgroundScript(currentReaderTheme.background),
 		[],
@@ -233,46 +76,6 @@ export default function ReaderScreen() {
 		readingDirection === "rtl"
 			? `${readerBackgroundScript}\n${rtlSwipeScript}\n${dictionaryTapScript}\n${renderedPaginationScript}`
 			: `${readerBackgroundScript}\n${dictionaryTapScript}\n${renderedPaginationScript}`;
-
-	const renderedPageIndicator = useMemo(() => {
-		if (
-			renderedPagination.status !== "ready" ||
-			!currentReaderLocation?.start?.displayed?.page ||
-			currentReaderLocation.start.index === undefined ||
-			renderedPagination.totalPages <= 0
-		) {
-			return null;
-		}
-
-		const currentSpineIndex = currentReaderLocation.start.index;
-		const currentLocalPage = currentReaderLocation.start.displayed.page;
-		const currentPageCount =
-			renderedPagination.pageCountsBySpineIndex[currentSpineIndex] ?? 0;
-
-		if (currentPageCount <= 0) {
-			return null;
-		}
-
-		const clampedLocalPage = Math.min(
-			Math.max(1, currentLocalPage),
-			currentPageCount,
-		);
-		const currentGlobalPage =
-			(renderedPagination.offsetsBySpineIndex[currentSpineIndex] ?? 0) +
-			clampedLocalPage;
-
-		return {
-			currentPage: currentGlobalPage,
-			totalPages: renderedPagination.totalPages,
-		};
-	}, [currentReaderLocation, renderedPagination]);
-
-	const readerControlsAnimatedStyle = useMemo(
-		() => ({
-			opacity: readerControlsAnimation,
-		}),
-		[readerControlsAnimation],
-	);
 
 	const runDictionaryLookup = useCallback(
 		async (selection: DictionarySelection) => {
@@ -312,45 +115,7 @@ export default function ReaderScreen() {
 		}
 
 		setReaderControlsVisible((isVisible) => !isVisible);
-	}, [closeDictionary, dictionarySelection]);
-
-	useEffect(() => {
-		Animated.timing(readerControlsAnimation, {
-			toValue: readerControlsVisible ? 1 : 0,
-			duration: readerControlFadeDuration,
-			easing: Easing.out(Easing.cubic),
-			useNativeDriver: true,
-		}).start();
-	}, [readerControlsAnimation, readerControlsVisible]);
-
-	useEffect(() => {
-		let isCancelled = false;
-
-		Animated.timing(pageIndicatorOpacity, {
-			toValue: 0,
-			duration: readerControlFadeDuration,
-			easing: Easing.out(Easing.cubic),
-			useNativeDriver: true,
-		}).start(() => {
-			if (isCancelled) {
-				return;
-			}
-
-			setPageIndicatorExpanded(readerControlsVisible);
-
-			Animated.timing(pageIndicatorOpacity, {
-				toValue: 1,
-				duration: readerControlFadeDuration,
-				easing: Easing.out(Easing.cubic),
-				useNativeDriver: true,
-			}).start();
-		});
-
-		return () => {
-			isCancelled = true;
-			pageIndicatorOpacity.stopAnimation();
-		};
-	}, [pageIndicatorOpacity, readerControlsVisible]);
+	}, [closeDictionary, dictionarySelection, setReaderControlsVisible]);
 
 	const handleLocationChange = useCallback(
 		(_totalLocations: number, currentLocation: ReaderLocation) => {
@@ -379,7 +144,7 @@ export default function ReaderScreen() {
 
 			currentReaderLocationKey.current = locationKey;
 		},
-		[closeDictionary],
+		[closeDictionary, setReaderControlsVisible],
 	);
 
 	const handleWebViewMessage = useCallback(
@@ -389,63 +154,7 @@ export default function ReaderScreen() {
 				| RenderedPaginationMessage
 				| { type?: string },
 		) => {
-			if (message.type === "rendered-pagination-loading") {
-				const payload =
-					"payload" in message && message.payload ? message.payload : {};
-
-				setRenderedPagination({
-					status: "loading",
-					layoutKey: payload.layoutKey,
-				});
-				return;
-			}
-
-			if (message.type === "rendered-pagination-ready") {
-				const payload =
-					"payload" in message && message.payload ? message.payload : {};
-				const pageCountsBySpineIndex = Object.fromEntries(
-					Object.entries(payload.pageCountsBySpineIndex ?? {})
-						.map(([spineIndex, pageCount]) => [
-							Number(spineIndex),
-							Number(pageCount),
-						])
-						.filter(
-							([spineIndex, pageCount]) =>
-								Number.isFinite(spineIndex) &&
-								Number.isFinite(pageCount) &&
-								pageCount > 0,
-						),
-				);
-				const sortedSpineIndexes = Object.keys(pageCountsBySpineIndex)
-					.map(Number)
-					.sort((a, b) => a - b);
-				const offsetsBySpineIndex: Record<number, number> = {};
-				let totalPages = 0;
-
-				for (const spineIndex of sortedSpineIndexes) {
-					offsetsBySpineIndex[spineIndex] = totalPages;
-					totalPages += pageCountsBySpineIndex[spineIndex];
-				}
-
-				setRenderedPagination({
-					status: "ready",
-					layoutKey: payload.layoutKey,
-					pageCountsBySpineIndex,
-					offsetsBySpineIndex,
-					totalPages: payload.totalPages || totalPages,
-				});
-				return;
-			}
-
-			if (message.type === "rendered-pagination-error") {
-				const payload =
-					"payload" in message && message.payload ? message.payload : {};
-
-				setRenderedPagination({
-					status: "error",
-					layoutKey: payload.layoutKey,
-					error: payload.error,
-				});
+			if (handleRenderedPaginationMessage(message)) {
 				return;
 			}
 
@@ -488,59 +197,33 @@ export default function ReaderScreen() {
 			});
 			runDictionaryLookup(message.payload);
 		},
-		[closeDictionary, handleReaderBackgroundTap, runDictionaryLookup],
+		[
+			closeDictionary,
+			handleReaderBackgroundTap,
+			handleRenderedPaginationMessage,
+			runDictionaryLookup,
+			setReaderControlsVisible,
+		],
 	);
 
 	useEffect(() => {
-		let isMounted = true;
-		setBookUri(null);
-		setBookError(null);
+		if (!Number.isFinite(selectedBook.asset)) {
+			return;
+		}
+
 		closeDictionary();
 		setCurrentReaderLocation(null);
 		setRenderedPagination({ status: "idle" });
 		setReaderControlsVisible(false);
 		setPageIndicatorExpanded(false);
 		currentReaderLocationKey.current = null;
-		setReadingDirection("ltr");
-
-		async function loadBook() {
-			try {
-				const book = Asset.fromModule(selectedBook.asset);
-
-				await book.downloadAsync();
-
-				if (!book.localUri) {
-					throw new Error("Book asset was not downloaded locally");
-				}
-
-				const bookBase64 = await ExpoFileSystem.readAsStringAsync(
-					book.localUri,
-					{
-						encoding: "base64",
-					},
-				);
-				const detectedReadingDirection =
-					await detectReadingDirection(bookBase64);
-
-				if (isMounted) {
-					setReadingDirection(detectedReadingDirection);
-					setBookUri(bookBase64);
-				}
-			} catch (err) {
-				if (isMounted) {
-					setBookError(
-						err instanceof Error ? err.message : "Unable to load book",
-					);
-				}
-			}
-		}
-
-		loadBook();
-
-		return () => {
-			isMounted = false;
-		};
-	}, [closeDictionary, selectedBook.asset]);
+	}, [
+		closeDictionary,
+		selectedBook.asset,
+		setPageIndicatorExpanded,
+		setReaderControlsVisible,
+		setRenderedPagination,
+	]);
 
 	return (
 		<View style={{ flex: 1, backgroundColor: "#111111" }}>
