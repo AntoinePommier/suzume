@@ -1,4 +1,8 @@
-import BottomSheet, { BottomSheetScrollView } from "@gorhom/bottom-sheet";
+import BottomSheet, {
+	BottomSheetBackdrop,
+	type BottomSheetBackdropProps,
+	BottomSheetScrollView,
+} from "@gorhom/bottom-sheet";
 import {
 	useCallback,
 	useEffect,
@@ -162,6 +166,19 @@ export function DictionaryBottomSheet({
 			shouldDisplayEntries ? getDictionaryResultRows(lookupResult.entries) : [],
 		[lookupResult, shouldDisplayEntries],
 	);
+	const renderBackdrop = useCallback(
+		(props: BottomSheetBackdropProps) => (
+			<BottomSheetBackdrop
+				{...props}
+				appearsOnIndex={0}
+				disappearsOnIndex={-1}
+				enableTouchThrough={false}
+				opacity={0}
+				pressBehavior="close"
+			/>
+		),
+		[],
+	);
 
 	const handleSheetChange = useCallback(
 		(index: number) => {
@@ -257,6 +274,7 @@ export function DictionaryBottomSheet({
 			enablePanDownToClose
 			onChange={handleSheetChange}
 			topInset={top}
+			backdropComponent={renderBackdrop}
 			backgroundStyle={styles.background}
 			handleStyle={styles.handle}
 			handleIndicatorStyle={styles.handleIndicator}
