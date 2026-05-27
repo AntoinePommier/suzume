@@ -11,6 +11,10 @@ const jszipSource =
 const projectRoot = path.resolve(__dirname, "..");
 const dictionariesDir = path.join(projectRoot, "assets", "dictionaries");
 const sourceZipPath = path.join(dictionariesDir, "jitendex-yomitan.zip");
+const jpdbFrequencyZipPath = path.join(
+	dictionariesDir,
+	"JPDB_v2.2_Frequency_Kana_2024-10-13.zip",
+);
 const outputDatabasePath = path.join(dictionariesDir, "jitendex.sqlite");
 const batchSize = 500;
 
@@ -269,6 +273,14 @@ function isTermBank(fileName) {
 	return /(^|\/)term_bank_\d+\.json$/.test(fileName);
 }
 
+function isTagBank(fileName) {
+	return /(^|\/)tag_bank_\d+\.json$/.test(fileName);
+}
+
+function isTermMetaBank(fileName) {
+	return /(^|\/)term_meta_bank_\d+\.json$/.test(fileName);
+}
+
 function findIndexFile(fileNames) {
 	return (
 		fileNames.find((name) => name === "index.json") ||
@@ -331,6 +343,8 @@ PRAGMA temp_store = MEMORY;
 PRAGMA locking_mode = EXCLUSIVE;
 
 DROP TABLE IF EXISTS dictionary_glosses;
+DROP TABLE IF EXISTS dictionary_term_meta;
+DROP TABLE IF EXISTS dictionary_tags;
 DROP TABLE IF EXISTS dictionary_terms;
 DROP TABLE IF EXISTS dictionary_metadata;
 
@@ -343,8 +357,13 @@ CREATE TABLE dictionary_terms (
 	id INTEGER PRIMARY KEY,
 	expression TEXT NOT NULL,
 	reading TEXT,
+	definition_tags TEXT,
+	rules TEXT,
 	score INTEGER,
 	sequence INTEGER,
+	term_tags TEXT,
+	term_bank_order INTEGER NOT NULL,
+	dictionary_id INTEGER NOT NULL,
 	dictionary_name TEXT NOT NULL
 );
 
@@ -354,6 +373,25 @@ CREATE TABLE dictionary_glosses (
 	glossary_index INTEGER NOT NULL,
 	glossary_text TEXT NOT NULL,
 	FOREIGN KEY (term_id) REFERENCES dictionary_terms(id) ON DELETE CASCADE
+);
+
+CREATE TABLE dictionary_tags (
+	dictionary_name TEXT NOT NULL,
+	name TEXT NOT NULL,
+	category TEXT,
+	sort_order INTEGER,
+	notes TEXT,
+	score INTEGER,
+	PRIMARY KEY (dictionary_name, name)
+);
+
+CREATE TABLE dictionary_term_meta (
+	dictionary_name TEXT NOT NULL,
+	expression TEXT NOT NULL,
+	reading TEXT,
+	mode TEXT NOT NULL,
+	data_json TEXT NOT NULL,
+	frequency_score INTEGER
 );
 `;
 }
@@ -381,7 +419,7 @@ ${Object.entries(metadata)
 `;
 }
 
-function termInsertSql(term, dictionaryName, termId) {
+function termInsertSql(term, dictionaryName, dictionaryId, termId, termBankOrder) {
 	const expression = term[0] || "";
 
 	if (!expression) {
@@ -393,15 +431,25 @@ function termInsertSql(term, dictionaryName, termId) {
 	id,
 	expression,
 	reading,
+	definition_tags,
+	rules,
 	score,
 	sequence,
+	term_tags,
+	term_bank_order,
+	dictionary_id,
 	dictionary_name
 ) VALUES (
 	${termId},
 	${quoteSql(expression)},
 	${quoteSql(term[1] || "")},
+	${quoteSql(term[2] || "")},
+	${quoteSql(term[3] || "")},
 	${numberOrNull(term[4]) ?? 0},
 	${numberOrNull(term[6]) ?? "NULL"},
+	${quoteSql(term[7] || "")},
+	${termBankOrder},
+	${dictionaryId},
 	${quoteSql(dictionaryName)}
 );\n`;
 
@@ -422,7 +470,66 @@ function termInsertSql(term, dictionaryName, termId) {
 	return { sql: `${termSql}${glossSql}`, glossCount: glosses.length };
 }
 
-function finalSql(termCount, glossCount) {
+function tagInsertSql(tag, dictionaryName) {
+	if (!Array.isArray(tag) || !tag[0]) {
+		return "";
+	}
+
+	return `INSERT OR REPLACE INTO dictionary_tags (
+	dictionary_name,
+	name,
+	category,
+	sort_order,
+	notes,
+	score
+) VALUES (
+	${quoteSql(dictionaryName)},
+	${quoteSql(tag[0] || "")},
+	${quoteSql(tag[1] || "")},
+	${numberOrNull(tag[2]) ?? "NULL"},
+	${quoteSql(tag[3] || "")},
+	${numberOrNull(tag[4]) ?? "NULL"}
+);\n`;
+}
+
+function termMetaInsertSql(meta, dictionaryName) {
+	if (!Array.isArray(meta) || !meta[0] || !meta[1]) {
+		return "";
+	}
+
+	const data = meta[2] ?? null;
+	const reading =
+		data && typeof data === "object" && typeof data.reading === "string"
+			? data.reading
+			: null;
+	const frequency =
+		data && typeof data === "object" && typeof data.value === "number"
+			? data.value
+			: data &&
+					typeof data === "object" &&
+					data.frequency &&
+					typeof data.frequency.value === "number"
+				? data.frequency.value
+				: null;
+
+	return `INSERT INTO dictionary_term_meta (
+	dictionary_name,
+	expression,
+	reading,
+	mode,
+	data_json,
+	frequency_score
+) VALUES (
+	${quoteSql(dictionaryName)},
+	${quoteSql(meta[0] || "")},
+	${quoteSql(reading)},
+	${quoteSql(meta[1] || "")},
+	${quoteSql(JSON.stringify(data))},
+	${numberOrNull(frequency) ?? "NULL"}
+);\n`;
+}
+
+function finalSql(termCount, glossCount, tagCount, termMetaCount) {
 	return `
 INSERT OR REPLACE INTO dictionary_metadata (key, value)
 VALUES ('term_count', ${quoteSql(termCount)});
@@ -430,18 +537,74 @@ VALUES ('term_count', ${quoteSql(termCount)});
 INSERT OR REPLACE INTO dictionary_metadata (key, value)
 VALUES ('gloss_count', ${quoteSql(glossCount)});
 
+INSERT OR REPLACE INTO dictionary_metadata (key, value)
+VALUES ('tag_count', ${quoteSql(tagCount)});
+
+INSERT OR REPLACE INTO dictionary_metadata (key, value)
+VALUES ('term_meta_count', ${quoteSql(termMetaCount)});
+
 CREATE INDEX idx_dictionary_terms_expression
 	ON dictionary_terms(expression);
 
 CREATE INDEX idx_dictionary_terms_reading
 	ON dictionary_terms(reading);
 
+CREATE INDEX idx_dictionary_terms_sequence
+	ON dictionary_terms(sequence);
+
 CREATE INDEX idx_dictionary_glosses_term_id
 	ON dictionary_glosses(term_id);
+
+CREATE INDEX idx_dictionary_term_meta_expression_reading_mode
+	ON dictionary_term_meta(expression, reading, mode);
+
+CREATE INDEX idx_dictionary_term_meta_expression_mode
+	ON dictionary_term_meta(expression, mode);
+
+CREATE INDEX idx_dictionary_term_meta_frequency_score
+	ON dictionary_term_meta(frequency_score);
 
 PRAGMA optimize;
 VACUUM;
 `;
+}
+
+async function importTermMetaBanks({
+	zip,
+	fileNames,
+	sqlite,
+	dictionaryName,
+	label,
+}) {
+	const termMetaBanks = fileNames
+		.filter(isTermMetaBank)
+		.sort((a, b) => termBankNumber(a) - termBankNumber(b));
+	let insertedTermMeta = 0;
+
+	console.log(`${label} term meta banks: ${termMetaBanks.length}`);
+
+	for (let bankIndex = 0; bankIndex < termMetaBanks.length; bankIndex += 1) {
+		const termMetaBank = termMetaBanks[bankIndex];
+		const termMeta = JSON.parse(await zip.file(termMetaBank).async("text"));
+
+		console.log(
+			`[${label} term meta ${bankIndex + 1}/${termMetaBanks.length}] ${termMetaBank} (${termMeta.length} entries)`,
+		);
+
+		for (let index = 0; index < termMeta.length; index += batchSize) {
+			const batch = termMeta.slice(index, index + batchSize);
+			const inserts = batch
+				.map((meta) => termMetaInsertSql(meta, dictionaryName))
+				.filter(Boolean);
+
+			if (inserts.length > 0) {
+				insertedTermMeta += inserts.length;
+				await writeSql(sqlite, `BEGIN;\n${inserts.join("")}COMMIT;\n`);
+			}
+		}
+	}
+
+	return insertedTermMeta;
 }
 
 async function main() {
@@ -471,18 +634,44 @@ async function main() {
 	const termBanks = fileNames
 		.filter(isTermBank)
 		.sort((a, b) => termBankNumber(a) - termBankNumber(b));
+	const tagBanks = fileNames
+		.filter(isTagBank)
+		.sort((a, b) => termBankNumber(a) - termBankNumber(b));
 
 	console.log(`Dictionary: ${dictionaryName}`);
 	console.log(`Term banks: ${termBanks.length}`);
+	console.log(`Tag banks: ${tagBanks.length}`);
 	console.log(`Writing ${path.relative(projectRoot, outputDatabasePath)}`);
 
 	const sqlite = runSqlite(outputDatabasePath);
 	let insertedEntries = 0;
 	let insertedGlosses = 0;
+	let insertedTags = 0;
+	let insertedTermMeta = 0;
 	let nextTermId = 1;
+	const dictionaryId = 1;
 
 	await writeSql(sqlite, createSchemaSql());
 	await writeSql(sqlite, metadataSql(index));
+
+	for (let bankIndex = 0; bankIndex < tagBanks.length; bankIndex += 1) {
+		const tagBank = tagBanks[bankIndex];
+		const tags = JSON.parse(await zip.file(tagBank).async("text"));
+
+		console.log(
+			`[tags ${bankIndex + 1}/${tagBanks.length}] ${tagBank} (${tags.length} entries)`,
+		);
+
+		for (let index = 0; index < tags.length; index += batchSize) {
+			const batch = tags.slice(index, index + batchSize);
+			const inserts = batch.map((tag) => tagInsertSql(tag, dictionaryName)).filter(Boolean);
+
+			if (inserts.length > 0) {
+				insertedTags += inserts.length;
+				await writeSql(sqlite, `BEGIN;\n${inserts.join("")}COMMIT;\n`);
+			}
+		}
+	}
 
 	for (let bankIndex = 0; bankIndex < termBanks.length; bankIndex += 1) {
 		const termBank = termBanks[bankIndex];
@@ -496,8 +685,16 @@ async function main() {
 			const batch = terms.slice(index, index + batchSize);
 			const inserts = [];
 
-			for (const term of batch) {
-				const insert = termInsertSql(term, dictionaryName, nextTermId);
+			for (let batchIndex = 0; batchIndex < batch.length; batchIndex += 1) {
+				const term = batch[batchIndex];
+				const termBankOrder = bankIndex * 1000000 + index + batchIndex;
+				const insert = termInsertSql(
+					term,
+					dictionaryName,
+					dictionaryId,
+					nextTermId,
+					termBankOrder,
+				);
 
 				if (insert.sql) {
 					inserts.push(insert.sql);
@@ -517,13 +714,55 @@ async function main() {
 		);
 	}
 
+	insertedTermMeta += await importTermMetaBanks({
+		zip,
+		fileNames,
+		sqlite,
+		dictionaryName,
+		label: "Jitendex",
+	});
+
+	if (fs.existsSync(jpdbFrequencyZipPath)) {
+		console.log(`Reading ${path.relative(projectRoot, jpdbFrequencyZipPath)}`);
+
+		const jpdbZip = await JSZip.loadAsync(fs.readFileSync(jpdbFrequencyZipPath));
+		const jpdbFileNames = Object.keys(jpdbZip.files);
+		const jpdbIndexFile = findIndexFile(jpdbFileNames);
+
+		if (!jpdbIndexFile) {
+			throw new Error("Invalid JPDB frequency zip: missing index.json");
+		}
+
+		const jpdbIndex = JSON.parse(await jpdbZip.file(jpdbIndexFile).async("text"));
+		const jpdbDictionaryName =
+			jpdbIndex.title || jpdbIndex.revision || "JPDB Frequency";
+
+		insertedTermMeta += await importTermMetaBanks({
+			zip: jpdbZip,
+			fileNames: jpdbFileNames,
+			sqlite,
+			dictionaryName: jpdbDictionaryName,
+			label: "JPDB",
+		});
+	} else {
+		console.warn(
+			`Skipping JPDB frequency metadata; missing ${path.relative(
+				projectRoot,
+				jpdbFrequencyZipPath,
+			)}`,
+		);
+	}
+
 	console.log("Creating indexes...");
-	await writeSql(sqlite, finalSql(insertedEntries, insertedGlosses));
+	await writeSql(
+		sqlite,
+		finalSql(insertedEntries, insertedGlosses, insertedTags, insertedTermMeta),
+	);
 	await closeSqlite(sqlite);
 
 	const sizeInMb = fs.statSync(outputDatabasePath).size / 1024 / 1024;
 	console.log(
-		`Done. Wrote ${insertedEntries} terms and ${insertedGlosses} glosses to ${path.relative(
+		`Done. Wrote ${insertedEntries} terms, ${insertedGlosses} glosses, ${insertedTags} tags, and ${insertedTermMeta} term metadata rows to ${path.relative(
 			projectRoot,
 			outputDatabasePath,
 		)} (${sizeInMb.toFixed(1)} MB).`,

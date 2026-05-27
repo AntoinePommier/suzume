@@ -89,6 +89,8 @@ const ichidanStemEndings = new Set([
 	"レ",
 ]);
 
+const cjkCharacterPattern = /^[\u3400-\u9fff]$/;
+
 function formName(form: JapaneseDeinflectionForm) {
 	return formNames[form] ?? String(form);
 }
@@ -100,7 +102,9 @@ function hasIchidanStemEnding(word: string) {
 		return false;
 	}
 
-	return ichidanStemEndings.has(characters[characters.length - 2]);
+	const stemEnding = characters[characters.length - 2];
+
+	return ichidanStemEndings.has(stemEnding) || cjkCharacterPattern.test(stemEnding);
 }
 
 function deinflectWord(word: string, rule: JapaneseDeinflectionRule) {

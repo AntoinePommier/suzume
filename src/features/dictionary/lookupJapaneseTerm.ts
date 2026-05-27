@@ -1,72 +1,37 @@
 import { getBundledJitendexDatabase } from "./dictionaryDatabase";
-import { deinflectJapaneseTerm, type JapaneseDeinflection } from "./japaneseDeinflector";
+import {
+	createDictionaryMatches,
+	createLookupCandidates,
+	createRankedDictionaryMatchGroups,
+	normalizeLookupSource,
+	type DictionaryLookupCandidate,
+	type RankedDictionaryMatchGroup,
+} from "./lookup/rankDictionaryMatches";
 import type { DictionaryLookupEntry, DictionaryLookupResult } from "./types";
 
 const maxLookupLength = 20;
-const maxEntries = 6;
+const maxEntries = 30;
 const maxLookupCandidates = 400;
 const maxBulkRows = 1000;
 type BundledDictionaryDatabase = NonNullable<
 	Awaited<ReturnType<typeof getBundledJitendexDatabase>>
 >;
 
-function normalizeLookupSource(text: string) {
-	return Array.from(text.replace(/\s+/g, "")).slice(0, maxLookupLength);
-}
-
-function isSingleKanjiExpression(text: string) {
-	return Array.from(text).length === 1 && /^[\u3400-\u9fff]$/.test(text);
-}
-
-type LookupCandidate = JapaneseDeinflection & {
-	order: number;
-};
-
-type RankedMatch = {
-	row: DictionaryTermRow;
-	order: number;
-	surfaceLength: number;
-	dictionaryLength: number;
-	isExactSurface: boolean;
-	isKanjiOnlyEntry: boolean;
-};
-
 type DictionaryTermRow = {
 	id: number;
 	expression: string;
 	reading: string | null;
+	definition_tags: string | null;
+	rules: string | null;
 	score: number | null;
 	sequence: number | null;
+	term_tags: string | null;
+	term_bank_order: number | null;
+	dictionary_id: number | null;
+	tag_score: number | null;
+	gloss_count: number | null;
+	jpdb_frequency_score: number | null;
 };
-
-function createLookupCandidates(after: string) {
-	const characters = normalizeLookupSource(after);
-	const candidates: LookupCandidate[] = [];
-	const seen = new Set<string>();
-	let order = 0;
-
-	for (let length = characters.length; length > 0; length -= 1) {
-		const surfaceForm = characters.slice(0, length).join("");
-
-		for (const deinflection of deinflectJapaneseTerm(surfaceForm)) {
-			const key = deinflection.dictionaryForm;
-
-			if (seen.has(key)) {
-				continue;
-			}
-
-			seen.add(key);
-			candidates.push({ ...deinflection, order });
-			order += 1;
-
-			if (candidates.length >= maxLookupCandidates) {
-				return candidates;
-			}
-		}
-	}
-
-	return candidates;
-}
 
 async function loadGlossesForTerms(
 	db: BundledDictionaryDatabase,
@@ -100,38 +65,31 @@ async function loadGlossesForTerms(
 }
 
 function toLookupEntries(
-	rows: DictionaryTermRow[],
+	groups: RankedDictionaryMatchGroup[],
 	glossesByTermId: Map<number, string[]>,
-	candidatesByTerm: Map<string, LookupCandidate>,
 ): DictionaryLookupEntry[] {
-	return rows.map((row) => ({
-		expression: row.expression,
-		reading: row.reading ?? "",
-		glossary: glossesByTermId.get(row.id) ?? [],
-		score: row.score ?? 0,
-		sequence: row.sequence,
-		surfaceForm:
-			candidatesByTerm.get(row.expression)?.surfaceForm ??
-			candidatesByTerm.get(row.reading ?? "")?.surfaceForm ??
-			row.expression,
-		dictionaryForm:
-			candidatesByTerm.get(row.expression)?.dictionaryForm ??
-			candidatesByTerm.get(row.reading ?? "")?.dictionaryForm ??
-			row.expression,
-		deinflectionReasons:
-			candidatesByTerm.get(row.expression)?.reasons ??
-			candidatesByTerm.get(row.reading ?? "")?.reasons ??
-			[],
-		deinflectionRules:
-			candidatesByTerm.get(row.expression)?.rules ??
-			candidatesByTerm.get(row.reading ?? "")?.rules ??
-			[],
-	}));
+	return groups.map((group) => {
+		const row = group.representative.row as DictionaryTermRow;
+		const { candidate } = group.representative;
+
+		return {
+			expression: row.expression,
+			reading: row.reading ?? "",
+			glossary: glossesByTermId.get(row.id) ?? [],
+			score: row.score ?? 0,
+			sequence: row.sequence,
+			surfaceForm: candidate.surfaceForm,
+			dictionaryForm: candidate.dictionaryForm,
+			deinflectionReasons: candidate.reasons,
+			deinflectionRules: candidate.rules,
+		};
+	});
 }
 
 async function queryCandidates(
 	db: BundledDictionaryDatabase,
-	candidates: LookupCandidate[],
+	candidates: DictionaryLookupCandidate[],
+	after: string,
 ): Promise<DictionaryLookupEntry[]> {
 	if (candidates.length === 0) {
 		return [];
@@ -140,10 +98,40 @@ async function queryCandidates(
 	const terms = candidates.map((candidate) => candidate.dictionaryForm);
 	const placeholders = terms.map(() => "?").join(", ");
 	const rows = await db.getAllAsync<DictionaryTermRow>(
-		`SELECT id, expression, reading, score, sequence
-		 FROM dictionary_terms
-		 WHERE expression IN (${placeholders})
-		    OR reading IN (${placeholders})
+		`SELECT
+			terms.id,
+			terms.expression,
+			terms.reading,
+			terms.definition_tags,
+			terms.rules,
+			terms.score,
+			terms.sequence,
+			terms.term_tags,
+			terms.term_bank_order,
+			terms.dictionary_id,
+			COALESCE(MAX(tags.score), 0) AS tag_score,
+			(
+				SELECT COUNT(*)
+				FROM dictionary_glosses AS glosses
+				WHERE glosses.term_id = terms.id
+			) AS gloss_count,
+			(
+				SELECT MIN(meta.frequency_score)
+				FROM dictionary_term_meta AS meta
+				WHERE meta.mode = 'freq'
+				  AND meta.expression = terms.expression
+				  AND (meta.reading = terms.reading OR meta.reading IS NULL)
+			) AS jpdb_frequency_score
+		 FROM dictionary_terms AS terms
+		 LEFT JOIN dictionary_tags AS tags
+		   ON tags.dictionary_name = terms.dictionary_name
+		 	AND instr(
+				' ' || COALESCE(terms.term_tags, '') || ' ' || COALESCE(terms.definition_tags, '') || ' ',
+				' ' || tags.name || ' '
+			) > 0
+		 WHERE terms.expression IN (${placeholders})
+		    OR terms.reading IN (${placeholders})
+		 GROUP BY terms.id
 		 LIMIT ?`,
 		...terms,
 		...terms,
@@ -154,63 +142,21 @@ async function queryCandidates(
 		return [];
 	}
 
-	const candidatesByTerm = new Map<string, LookupCandidate>();
-	const orderByTerm = new Map<string, number>();
+	const matches = createDictionaryMatches(rows, candidates);
+	const bestGroups = createRankedDictionaryMatchGroups(matches, after, {
+		maxLookupLength,
+	}).slice(0, maxEntries);
 
-	for (const candidate of candidates) {
-		candidatesByTerm.set(candidate.dictionaryForm, candidate);
-		orderByTerm.set(candidate.dictionaryForm, candidate.order);
-	}
-
-	const matchingRows = rows
-		.map((row) => {
-			const expressionOrder = orderByTerm.get(row.expression);
-			const readingOrder = orderByTerm.get(row.reading ?? "");
-			const order =
-				expressionOrder !== undefined && readingOrder !== undefined
-					? Math.min(expressionOrder, readingOrder)
-				: (expressionOrder ?? readingOrder);
-
-			const candidate =
-				candidatesByTerm.get(row.expression) ??
-				candidatesByTerm.get(row.reading ?? "");
-
-			return order === undefined || !candidate
-				? null
-				: {
-						row,
-						order,
-						surfaceLength: Array.from(candidate.surfaceForm).length,
-						dictionaryLength: Array.from(candidate.dictionaryForm).length,
-						isExactSurface:
-							row.expression === candidate.surfaceForm ||
-							row.reading === candidate.surfaceForm,
-						isKanjiOnlyEntry:
-							(row.score !== null && row.score < 0) ||
-							isSingleKanjiExpression(row.expression),
-					};
-		})
-		.filter((item): item is RankedMatch => Boolean(item));
-
-	if (matchingRows.length === 0) {
+	if (bestGroups.length === 0) {
 		return [];
 	}
 
-	const bestRows = matchingRows
-		.sort(
-			(a, b) =>
-				Number(a.isKanjiOnlyEntry) - Number(b.isKanjiOnlyEntry) ||
-				Number(b.isExactSurface) - Number(a.isExactSurface) ||
-				(b.row.score ?? 0) - (a.row.score ?? 0) ||
-				a.surfaceLength - b.surfaceLength ||
-				b.dictionaryLength - a.dictionaryLength ||
-				a.order - b.order,
-		)
-		.slice(0, maxEntries)
-		.map((item) => item.row);
+	const bestRows = bestGroups.map(
+		(group) => group.representative.row as DictionaryTermRow,
+	);
 	const glossesByTermId = await loadGlossesForTerms(db, bestRows);
 
-	return toLookupEntries(bestRows, glossesByTermId, candidatesByTerm);
+	return toLookupEntries(bestGroups, glossesByTermId);
 }
 
 async function queryExactPrefixFallback(
@@ -222,10 +168,40 @@ async function queryExactPrefixFallback(
 	for (let length = characters.length; length > 0; length -= 1) {
 		const candidate = characters.slice(0, length).join("");
 		const rows = await db.getAllAsync<DictionaryTermRow>(
-			`SELECT id, expression, reading, score, sequence
-			 FROM dictionary_terms
-			 WHERE expression = ?
-			 ORDER BY score DESC
+			`SELECT
+				terms.id,
+				terms.expression,
+				terms.reading,
+				terms.definition_tags,
+				terms.rules,
+				terms.score,
+				terms.sequence,
+				terms.term_tags,
+				terms.term_bank_order,
+				terms.dictionary_id,
+				COALESCE(MAX(tags.score), 0) AS tag_score,
+				(
+					SELECT COUNT(*)
+					FROM dictionary_glosses AS glosses
+					WHERE glosses.term_id = terms.id
+				) AS gloss_count,
+				(
+					SELECT MIN(meta.frequency_score)
+					FROM dictionary_term_meta AS meta
+					WHERE meta.mode = 'freq'
+					  AND meta.expression = terms.expression
+					  AND (meta.reading = terms.reading OR meta.reading IS NULL)
+				) AS jpdb_frequency_score
+			 FROM dictionary_terms AS terms
+			 LEFT JOIN dictionary_tags AS tags
+			   ON tags.dictionary_name = terms.dictionary_name
+			  AND instr(
+				' ' || COALESCE(terms.term_tags, '') || ' ' || COALESCE(terms.definition_tags, '') || ' ',
+				' ' || tags.name || ' '
+			) > 0
+			 WHERE terms.expression = ?
+			 GROUP BY terms.id
+			 ORDER BY terms.score DESC
 			 LIMIT ?`,
 			candidate,
 			maxEntries,
@@ -235,17 +211,51 @@ async function queryExactPrefixFallback(
 			continue;
 		}
 
-		const lookupCandidate: LookupCandidate = {
-			order: 0,
+		const lookupCandidate: DictionaryLookupCandidate = {
+			candidateOrder: 0,
+			inflectionChainLength: 0,
 			surfaceForm: candidate,
 			dictionaryForm: candidate,
 			reasons: [],
 			rules: [],
 		};
 		const glossesByTermId = await loadGlossesForTerms(db, rows);
-		const candidatesByTerm = new Map([[candidate, lookupCandidate]]);
+		const groups = rows.map((row) => ({
+			groupKey: `term:${row.expression}\u0000${row.reading ?? ""}`,
+			groupMatches: [
+				{
+					row,
+					candidate: lookupCandidate,
+					matchSource: "expression" as const,
+				},
+			],
+			representative: {
+				row,
+				candidate: lookupCandidate,
+				matchSource: "expression" as const,
+			},
+			rank: {
+				matchSourceStrength: 5,
+				maxSurfaceLength: Array.from(candidate).length,
+				exactExpressionMatchCount: 1,
+				exactReadingMatchCount: 0,
+				deinflectionChainLength: 0,
+				ruleConfidence: 3,
+				sourceClass: "exact-expression-full-source" as const,
+				sourceClassRank: 0,
+				bestScore: row.score ?? 0,
+				bestTagScore: row.tag_score ?? 0,
+				bestFrequencyScore: row.jpdb_frequency_score ?? null,
+				bestGlossCount: row.gloss_count ?? 0,
+				termBankOrder: row.term_bank_order ?? 0,
+				dictionaryId: row.dictionary_id ?? 0,
+				isSingleCharacter: Array.from(row.expression).length === 1,
+				isKanjiOnly: false,
+				candidateOrder: 0,
+			},
+		}));
 
-		return toLookupEntries(rows, glossesByTermId, candidatesByTerm);
+		return toLookupEntries(groups, glossesByTermId);
 	}
 
 	return [];
@@ -264,7 +274,11 @@ export async function lookupJapaneseTermFromSqlite(
 		};
 	}
 
-	const entries = await queryCandidates(db, createLookupCandidates(after));
+	const entries = await queryCandidates(
+		db,
+		createLookupCandidates(after, { maxLookupLength, maxLookupCandidates }),
+		after,
+	);
 	const fallbackEntries =
 		entries.length > 0 ? entries : await queryExactPrefixFallback(db, after);
 

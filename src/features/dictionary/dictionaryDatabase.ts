@@ -93,6 +93,7 @@ async function copyBundledSqliteAssetIfNeeded(
 	databaseFileName: string,
 ) {
 	const destinationUri = `${ExpoFileSystem.documentDirectory}${databaseFileName}`;
+	const markerUri = `${destinationUri}.asset.json`;
 	const asset = Asset.fromModule(assetModule);
 	await asset.downloadAsync();
 
@@ -100,8 +101,9 @@ async function copyBundledSqliteAssetIfNeeded(
 		throw new Error("Bundled dictionary database asset was not downloaded");
 	}
 
-	const [destinationInfo, assetInfo] = await Promise.all([
+	const [destinationInfo, markerInfo, assetInfo] = await Promise.all([
 		ExpoFileSystem.getInfoAsync(destinationUri),
+		ExpoFileSystem.getInfoAsync(markerUri),
 		ExpoFileSystem.getInfoAsync(asset.localUri),
 	]);
 	const destinationSize =
@@ -109,23 +111,39 @@ async function copyBundledSqliteAssetIfNeeded(
 			? destinationInfo.size
 			: null;
 	const assetSize = assetInfo.exists && "size" in assetInfo ? assetInfo.size : null;
-
-	if (
+	const assetHash = asset.hash ?? null;
+	const marker = markerInfo.exists
+		? await ExpoFileSystem.readAsStringAsync(markerUri)
+				.then((value) => JSON.parse(value) as { hash?: string | null; size?: number | null })
+				.catch(() => null)
+		: null;
+	const isCurrentCopy =
 		destinationInfo.exists &&
 		assetSize !== null &&
-		destinationSize === assetSize
-	) {
+		destinationSize === assetSize &&
+		(!assetHash || marker?.hash === assetHash);
+
+	if (isCurrentCopy) {
 		return;
 	}
 
 	if (destinationInfo.exists) {
 		await ExpoFileSystem.deleteAsync(destinationUri, { idempotent: true });
 	}
+	await ExpoFileSystem.deleteAsync(markerUri, { idempotent: true });
 
 	await ExpoFileSystem.copyAsync({
 		from: asset.localUri,
 		to: destinationUri,
 	});
+	await ExpoFileSystem.writeAsStringAsync(
+		markerUri,
+		JSON.stringify({
+			hash: assetHash,
+			size: assetSize,
+			copiedAt: new Date().toISOString(),
+		}),
+	);
 }
 
 export async function openBundledDictionaryDatabase(
