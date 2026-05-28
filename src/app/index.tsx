@@ -1,14 +1,6 @@
-import { type Book, books } from "@/books";
-import { useBookCovers } from "@/features/reader/hooks/useBookCovers";
-import {
-	getReadingProgressState,
-	normalizeReadingProgress,
-	type ReadingProgressState,
-	type StoredReadingProgress,
-} from "@/features/reader/readingProgressStorage";
-import { colors, radius, spacing } from "@/theme";
 import { router, useFocusEffect } from "expo-router";
 import { StatusBar } from "expo-status-bar";
+import { Clock, Plus, Settings } from "lucide-react-native";
 import { useCallback, useState } from "react";
 import {
 	Image,
@@ -19,6 +11,15 @@ import {
 	View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import { type Book, books } from "@/books";
+import { useBookCovers } from "@/features/reader/hooks/useBookCovers";
+import {
+	getReadingProgressState,
+	normalizeReadingProgress,
+	type ReadingProgressState,
+	type StoredReadingProgress,
+} from "@/features/reader/readingProgressStorage";
+import { colors, radius, spacing } from "@/theme";
 
 function getCoverAccent(book: Book) {
 	if (book.id === "le-petit-prince") {
@@ -223,7 +224,7 @@ function ContinueCard({
 						</View>
 					) : null}
 					<View style={styles.continueLastRead}>
-						<Text style={styles.continueLastReadIcon}>◷</Text>
+						<Clock size={12} strokeWidth={2} color={colors.textMutedOnPaper} />
 						<Text style={styles.continueLastReadText}>Last read today</Text>
 					</View>
 				</View>
@@ -301,31 +302,44 @@ export default function HomeScreen() {
 					</View>
 
 					<View style={styles.headerActions}>
-						<Pressable
-							accessibilityRole="button"
-							accessibilityLabel="Import book"
-							onPress={handlePlaceholderAction}
-							style={({ pressed }) => [
-								styles.headerAction,
-								pressed ? styles.headerActionPressed : null,
-							]}
-						>
-							<Text style={styles.headerActionIcon}>+</Text>
-							<Text style={styles.headerActionLabel}>Import</Text>
-						</Pressable>
+						<View pointerEvents="none" style={styles.headerActionIconsRow}>
+							<View style={styles.headerActionIconBox}>
+								<Plus size={23} strokeWidth={2} color={colors.text} />
+							</View>
+							<View style={styles.headerActionIconBox}>
+								<Settings size={23} strokeWidth={2} color={colors.text} />
+							</View>
+						</View>
 
-						<Pressable
-							accessibilityRole="button"
-							accessibilityLabel="Settings"
-							onPress={handlePlaceholderAction}
-							style={({ pressed }) => [
-								styles.headerAction,
-								pressed ? styles.headerActionPressed : null,
-							]}
-						>
-							<Text style={styles.headerActionIcon}>⋯</Text>
-							<Text style={styles.headerActionLabel}>Settings</Text>
-						</Pressable>
+						<View pointerEvents="none" style={styles.headerActionLabelsRow}>
+							<View style={styles.headerActionLabelBox}>
+								<Text style={styles.headerActionLabel}>Import</Text>
+							</View>
+							<View style={styles.headerActionLabelBox}>
+								<Text style={styles.headerActionLabel}>Settings</Text>
+							</View>
+						</View>
+
+						<View style={styles.headerActionHitTargets}>
+							<Pressable
+								accessibilityRole="button"
+								accessibilityLabel="Import book"
+								onPress={handlePlaceholderAction}
+								style={({ pressed }) => [
+									styles.headerActionHitTarget,
+									pressed ? styles.headerActionPressed : null,
+								]}
+							/>
+							<Pressable
+								accessibilityRole="button"
+								accessibilityLabel="Settings"
+								onPress={handlePlaceholderAction}
+								style={({ pressed }) => [
+									styles.headerActionHitTarget,
+									pressed ? styles.headerActionPressed : null,
+								]}
+							/>
+						</View>
 					</View>
 				</View>
 
@@ -373,7 +387,7 @@ const styles = StyleSheet.create({
 	},
 	header: {
 		flexDirection: "row",
-		alignItems: "flex-start",
+		alignItems: "center",
 		justifyContent: "space-between",
 		gap: spacing.md,
 	},
@@ -385,37 +399,68 @@ const styles = StyleSheet.create({
 		fontSize: 22,
 		fontWeight: "600",
 		letterSpacing: 0,
+		lineHeight: 26,
 	},
 	subtitle: {
 		marginTop: 2,
 		color: colors.paperMuted,
 		fontSize: 12,
 		fontWeight: "500",
+		lineHeight: 15,
 	},
 	headerActions: {
+		position: "relative",
+		height: 42,
+		justifyContent: "space-between",
+	},
+	headerActionIconsRow: {
+		zIndex: 1,
+		flexDirection: "row",
+		alignItems: "center",
+		gap: spacing.sm,
+	},
+	headerActionLabelsRow: {
+		zIndex: 1,
+		flexDirection: "row",
+		alignItems: "flex-end",
+		gap: spacing.sm,
+	},
+	headerActionHitTargets: {
+		position: "absolute",
+		top: 0,
+		left: 0,
+		right: 0,
+		bottom: 0,
+		zIndex: 0,
 		flexDirection: "row",
 		gap: spacing.sm,
 	},
-	headerAction: {
-		minWidth: 42,
-		alignItems: "center",
-		paddingVertical: 2,
+	headerActionHitTarget: {
+		width: 48,
+		height: 42,
 		borderRadius: radius.md,
 	},
 	headerActionPressed: {
 		backgroundColor: colors.surfaceSoft,
 	},
-	headerActionIcon: {
-		color: colors.text,
-		fontSize: 22,
-		fontWeight: "300",
-		lineHeight: 24,
+	headerActionIconBox: {
+		width: 48,
+		height: 26,
+		alignItems: "center",
+		justifyContent: "center",
+	},
+	headerActionLabelBox: {
+		width: 48,
+		height: 14,
+		alignItems: "center",
+		justifyContent: "flex-end",
 	},
 	headerActionLabel: {
-		marginTop: 1,
 		color: colors.textMuted,
 		fontSize: 10,
 		fontWeight: "500",
+		lineHeight: 12,
+		includeFontPadding: false,
 	},
 	section: {
 		marginTop: spacing.lg,
@@ -549,11 +594,6 @@ const styles = StyleSheet.create({
 		flexDirection: "row",
 		alignItems: "center",
 		gap: 6,
-	},
-	continueLastReadIcon: {
-		color: colors.textMutedOnPaper,
-		fontSize: 12,
-		lineHeight: 14,
 	},
 	continueLastReadText: {
 		color: colors.textOnPaper,
