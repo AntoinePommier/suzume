@@ -200,12 +200,22 @@ function ContinueCard({
 						<Text style={styles.continueProgressText}>
 							{Math.round(progressPercent)}% read
 						</Text>
-						<ProgressBar progress={progressPercent} />
+						<ContinueProgressBar progress={progressPercent} />
 					</View>
 				) : null}
-				<Text style={styles.continueAction}>Continue reading</Text>
+				<View style={styles.continueActionButton}>
+					<Text style={styles.continueActionButtonText}>Resume</Text>
+				</View>
 			</View>
 		</Pressable>
+	);
+}
+
+function ContinueProgressBar({ progress }: { progress: number }) {
+	return (
+		<View style={styles.continueProgressTrack}>
+			<View style={[styles.continueProgressFill, { width: `${progress}%` }]} />
+		</View>
 	);
 }
 
@@ -402,9 +412,9 @@ const styles = StyleSheet.create({
 		gap: spacing.sm,
 		paddingHorizontal: spacing.lg,
 		paddingVertical: spacing.lg,
-		backgroundColor: colors.surface,
+		backgroundColor: colors.paper,
 		borderWidth: StyleSheet.hairlineWidth,
-		borderColor: colors.border,
+		borderColor: colors.paperMuted,
 		borderRadius: radius.lg,
 	},
 	emptyIcon: {
@@ -413,10 +423,10 @@ const styles = StyleSheet.create({
 		alignItems: "center",
 		justifyContent: "center",
 		borderRadius: radius.md,
-		backgroundColor: colors.surfaceSoft,
+		backgroundColor: "rgba(179, 138, 58, 0.12)",
 	},
 	emptyIconText: {
-		color: colors.accentSoft,
+		color: colors.accent,
 		fontSize: 31,
 		lineHeight: 33,
 		transform: [{ rotate: "45deg" }],
@@ -425,47 +435,50 @@ const styles = StyleSheet.create({
 		alignItems: "center",
 	},
 	emptyTitle: {
-		color: colors.text,
+		color: colors.textOnPaper,
 		fontSize: 16,
 		fontWeight: "600",
 		textAlign: "center",
 	},
 	emptyDescription: {
 		marginTop: spacing.xs,
-		color: colors.textMuted,
+		color: colors.textMutedOnPaper,
 		fontSize: 13,
 		lineHeight: 18,
 		textAlign: "center",
 	},
 	continueCard: {
 		flexDirection: "row",
-		alignItems: "center",
+		alignItems: "stretch",
 		gap: spacing.md,
-		paddingHorizontal: spacing.md,
-		paddingVertical: spacing.md,
-		backgroundColor: colors.surface,
+		paddingHorizontal: spacing.md - 2,
+		paddingVertical: spacing.md - 2,
+		backgroundColor: colors.paper,
 		borderWidth: StyleSheet.hairlineWidth,
-		borderColor: colors.border,
+		borderColor: colors.paperMuted,
 		borderRadius: radius.lg,
 	},
 	continueCardPressed: {
 		opacity: 0.86,
 	},
 	continueCover: {
-		width: 78,
+		width: 128,
+		alignSelf: "stretch",
+		justifyContent: "center",
 	},
 	continueCopy: {
 		flex: 1,
+		paddingVertical: 1,
 	},
 	continueTitle: {
-		color: colors.text,
-		fontSize: 16,
+		color: colors.textOnPaper,
+		fontSize: 19,
 		fontWeight: "700",
-		lineHeight: 20,
+		lineHeight: 23,
 	},
 	continueSubtitle: {
 		marginTop: 3,
-		color: colors.textMuted,
+		color: colors.textMutedOnPaper,
 		fontSize: 12,
 		fontWeight: "500",
 		lineHeight: 16,
@@ -475,14 +488,32 @@ const styles = StyleSheet.create({
 	},
 	continueProgressText: {
 		marginBottom: spacing.xs,
-		color: colors.paperMuted,
+		color: colors.accent,
 		fontSize: 11,
 		fontWeight: "600",
 	},
-	continueAction: {
-		marginTop: spacing.sm,
-		color: colors.accentSoft,
-		fontSize: 12,
+	continueProgressTrack: {
+		height: 4,
+		overflow: "hidden",
+		borderRadius: radius.sm,
+		backgroundColor: "rgba(111, 103, 92, 0.22)",
+	},
+	continueProgressFill: {
+		height: "100%",
+		borderRadius: radius.sm,
+		backgroundColor: colors.accent,
+	},
+	continueActionButton: {
+		minHeight: 34,
+		marginTop: "auto",
+		alignItems: "center",
+		justifyContent: "center",
+		borderRadius: radius.sm,
+		backgroundColor: colors.background,
+	},
+	continueActionButtonText: {
+		color: colors.paper,
+		fontSize: 13,
 		fontWeight: "700",
 	},
 	libraryGrid: {
