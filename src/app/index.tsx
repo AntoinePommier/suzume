@@ -1,3 +1,12 @@
+import { type Book, books } from "@/books";
+import { useBookCovers } from "@/features/reader/hooks/useBookCovers";
+import {
+	getReadingProgressState,
+	normalizeReadingProgress,
+	type ReadingProgressState,
+	type StoredReadingProgress,
+} from "@/features/reader/readingProgressStorage";
+import { colors, radius, spacing } from "@/theme";
 import { router, useFocusEffect } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useState } from "react";
@@ -10,15 +19,6 @@ import {
 	View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { type Book, books } from "@/books";
-import { useBookCovers } from "@/features/reader/hooks/useBookCovers";
-import {
-	getReadingProgressState,
-	normalizeReadingProgress,
-	type ReadingProgressState,
-	type StoredReadingProgress,
-} from "@/features/reader/readingProgressStorage";
-import { colors, radius, spacing } from "@/theme";
 
 function getCoverAccent(book: Book) {
 	if (book.id === "le-petit-prince") {
@@ -28,11 +28,21 @@ function getCoverAccent(book: Book) {
 	return colors.accent;
 }
 
-function PlaceholderCover({ book }: { book: Book }) {
+type BookCoverVariant = "default" | "continue";
+
+function PlaceholderCover({
+	book,
+	variant = "default",
+}: {
+	book: Book;
+	variant?: BookCoverVariant;
+}) {
 	const accentColor = getCoverAccent(book);
+	const coverVariantStyle =
+		variant === "continue" ? styles.continueCoverInner : null;
 
 	return (
-		<View style={styles.cover}>
+		<View style={[styles.cover, coverVariantStyle]}>
 			<View style={[styles.coverAccent, { backgroundColor: accentColor }]} />
 			<View style={styles.coverContent}>
 				<Text numberOfLines={3} style={styles.coverTitle}>
@@ -51,15 +61,19 @@ function PlaceholderCover({ book }: { book: Book }) {
 function BookCover({
 	book,
 	coverUri,
+	variant = "default",
 }: {
 	book: Book;
 	coverUri: string | null | undefined;
+	variant?: BookCoverVariant;
 }) {
 	const [imageFailed, setImageFailed] = useState(false);
+	const coverVariantStyle =
+		variant === "continue" ? styles.continueCoverInner : null;
 
 	if (coverUri && !imageFailed) {
 		return (
-			<View style={[styles.cover, styles.realCover]}>
+			<View style={[styles.cover, coverVariantStyle, styles.realCover]}>
 				<Image
 					source={{ uri: coverUri }}
 					style={styles.coverImage}
@@ -70,7 +84,7 @@ function BookCover({
 		);
 	}
 
-	return <PlaceholderCover book={book} />;
+	return <PlaceholderCover book={book} variant={variant} />;
 }
 
 const contentHorizontalPadding = 22;
@@ -186,23 +200,33 @@ function ContinueCard({
 			}
 		>
 			<View style={styles.continueCover}>
-				<BookCover book={book} coverUri={coverUri} />
+				<View style={styles.continueCoverShadow}>
+					<BookCover book={book} coverUri={coverUri} variant="continue" />
+				</View>
 			</View>
 			<View style={styles.continueCopy}>
-				<Text numberOfLines={2} style={styles.continueTitle}>
-					{book.title}
-				</Text>
-				<Text numberOfLines={2} style={styles.continueSubtitle}>
-					{book.subtitle}
-				</Text>
-				{progressPercent !== null ? (
-					<View style={styles.continueProgress}>
-						<Text style={styles.continueProgressText}>
-							{Math.round(progressPercent)}% read
-						</Text>
-						<ContinueProgressBar progress={progressPercent} />
+				<View style={styles.continueTitleGroup}>
+					<Text numberOfLines={2} style={styles.continueTitle}>
+						{book.title}
+					</Text>
+					<Text numberOfLines={2} style={styles.continueSubtitle}>
+						{book.subtitle}
+					</Text>
+				</View>
+				<View style={styles.continueDetails}>
+					{progressPercent !== null ? (
+						<View style={styles.continueProgress}>
+							<Text style={styles.continueProgressText}>
+								{Math.round(progressPercent)}% read
+							</Text>
+							<ContinueProgressBar progress={progressPercent} />
+						</View>
+					) : null}
+					<View style={styles.continueLastRead}>
+						<Text style={styles.continueLastReadIcon}>◷</Text>
+						<Text style={styles.continueLastReadText}>Last read today</Text>
 					</View>
-				) : null}
+				</View>
 				<View style={styles.continueActionButton}>
 					<Text style={styles.continueActionButtonText}>Resume</Text>
 				</View>
@@ -359,7 +383,7 @@ const styles = StyleSheet.create({
 	title: {
 		color: colors.text,
 		fontSize: 22,
-		fontWeight: "700",
+		fontWeight: "600",
 		letterSpacing: 0,
 	},
 	subtitle: {
@@ -382,7 +406,7 @@ const styles = StyleSheet.create({
 		backgroundColor: colors.surfaceSoft,
 	},
 	headerActionIcon: {
-		color: colors.paperMuted,
+		color: colors.text,
 		fontSize: 22,
 		fontWeight: "300",
 		lineHeight: 24,
@@ -451,7 +475,7 @@ const styles = StyleSheet.create({
 		flexDirection: "row",
 		alignItems: "stretch",
 		gap: spacing.md,
-		paddingHorizontal: spacing.md - 2,
+		paddingHorizontal: spacing.md - 1,
 		paddingVertical: spacing.md - 2,
 		backgroundColor: colors.paper,
 		borderWidth: StyleSheet.hairlineWidth,
@@ -466,55 +490,88 @@ const styles = StyleSheet.create({
 		alignSelf: "stretch",
 		justifyContent: "center",
 	},
+	continueCoverShadow: {
+		width: "100%",
+		aspectRatio: 0.72,
+		borderRadius: radius.sm,
+		overflow: "visible",
+		backgroundColor: colors.paper,
+		boxShadow: "0px 2px 8px 0px rgba(0, 0, 0, 0.39)",
+	},
+	continueCoverInner: {
+		borderWidth: 0,
+		borderColor: "transparent",
+	},
 	continueCopy: {
 		flex: 1,
 		paddingVertical: 1,
+		justifyContent: "flex-end",
+		gap: spacing.md - 2,
+	},
+	continueTitleGroup: {
+		gap: 2,
+		marginBottom: spacing.sm,
+	},
+	continueDetails: {
+		gap: spacing.sm + 2,
 	},
 	continueTitle: {
 		color: colors.textOnPaper,
 		fontSize: 19,
-		fontWeight: "700",
+		fontWeight: "600",
 		lineHeight: 23,
 	},
 	continueSubtitle: {
-		marginTop: 3,
-		color: colors.textMutedOnPaper,
-		fontSize: 12,
-		fontWeight: "500",
+		color: colors.textOnPaper,
+		fontSize: 11,
+		fontWeight: "300",
 		lineHeight: 16,
 	},
-	continueProgress: {
-		marginTop: spacing.sm,
-	},
+	continueProgress: {},
 	continueProgressText: {
-		marginBottom: spacing.xs,
+		marginBottom: spacing.xs + 2,
 		color: colors.accent,
-		fontSize: 11,
-		fontWeight: "600",
+		fontSize: 10,
+		fontWeight: "500",
 	},
 	continueProgressTrack: {
-		height: 4,
+		height: 5,
 		overflow: "hidden",
 		borderRadius: radius.sm,
-		backgroundColor: "rgba(111, 103, 92, 0.22)",
+		backgroundColor: "#dcc8ae",
 	},
 	continueProgressFill: {
 		height: "100%",
 		borderRadius: radius.sm,
 		backgroundColor: colors.accent,
 	},
+	continueLastRead: {
+		flexDirection: "row",
+		alignItems: "center",
+		gap: 6,
+	},
+	continueLastReadIcon: {
+		color: colors.textMutedOnPaper,
+		fontSize: 12,
+		lineHeight: 14,
+	},
+	continueLastReadText: {
+		color: colors.textOnPaper,
+		fontSize: 10,
+		fontWeight: "400",
+		lineHeight: 14,
+	},
 	continueActionButton: {
 		minHeight: 34,
-		marginTop: "auto",
 		alignItems: "center",
 		justifyContent: "center",
 		borderRadius: radius.sm,
 		backgroundColor: colors.background,
 	},
 	continueActionButtonText: {
-		color: colors.paper,
+		color: "#f8dfbd",
 		fontSize: 13,
-		fontWeight: "700",
+		fontWeight: "500",
 	},
 	libraryGrid: {
 		flexDirection: "row",
