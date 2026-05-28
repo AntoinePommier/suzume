@@ -1,7 +1,8 @@
 import { router } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import { useCallback } from "react";
+import { useCallback, useState } from "react";
 import {
+	Image,
 	Pressable,
 	StyleSheet,
 	Text,
@@ -10,6 +11,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { type Book, books } from "@/books";
+import { useBookCovers } from "@/features/reader/hooks/useBookCovers";
 import { colors, radius, spacing } from "@/theme";
 
 function getCoverAccent(book: Book) {
@@ -40,6 +42,31 @@ function PlaceholderCover({ book }: { book: Book }) {
 	);
 }
 
+function BookCover({
+	book,
+	coverUri,
+}: {
+	book: Book;
+	coverUri: string | null | undefined;
+}) {
+	const [imageFailed, setImageFailed] = useState(false);
+
+	if (coverUri && !imageFailed) {
+		return (
+			<View style={[styles.cover, styles.realCover]}>
+				<Image
+					source={{ uri: coverUri }}
+					style={styles.coverImage}
+					resizeMode="cover"
+					onError={() => setImageFailed(true)}
+				/>
+			</View>
+		);
+	}
+
+	return <PlaceholderCover book={book} />;
+}
+
 const contentHorizontalPadding = 22;
 const librarySlotCount = 6;
 const emptyBookSlotIds = [
@@ -51,7 +78,15 @@ const emptyBookSlotIds = [
 	"empty-book-slot-6",
 ];
 
-function BookCard({ book, width }: { book: Book; width: number }) {
+function BookCard({
+	book,
+	coverUri,
+	width,
+}: {
+	book: Book;
+	coverUri: string | null | undefined;
+	width: number;
+}) {
 	return (
 		<Pressable
 			style={({ pressed }) => [
@@ -66,7 +101,7 @@ function BookCard({ book, width }: { book: Book; width: number }) {
 				})
 			}
 		>
-			<PlaceholderCover book={book} />
+			<BookCover book={book} coverUri={coverUri} />
 			<Text numberOfLines={2} style={styles.bookTitle}>
 				{book.title}
 			</Text>
@@ -85,6 +120,7 @@ function EmptyBookSlot({ width }: { width: number }) {
 export default function HomeScreen() {
 	const handlePlaceholderAction = useCallback(() => undefined, []);
 	const { height, width } = useWindowDimensions();
+	const coverUris = useBookCovers(books);
 	const continueCardHeight = Math.max(
 		168,
 		Math.min(214, Math.round(height * 0.24)),
@@ -157,7 +193,12 @@ export default function HomeScreen() {
 					<Text style={styles.sectionTitle}>Library</Text>
 					<View style={styles.libraryGrid}>
 						{books.map((book) => (
-							<BookCard key={book.id} book={book} width={bookCardWidth} />
+							<BookCard
+								key={book.id}
+								book={book}
+								coverUri={coverUris[book.id]}
+								width={bookCardWidth}
+							/>
 						))}
 						{emptySlotIds.map((slotId) => (
 							<EmptyBookSlot key={slotId} width={bookCardWidth} />
@@ -314,6 +355,14 @@ const styles = StyleSheet.create({
 		shadowOpacity: 0.13,
 		shadowRadius: 10,
 		elevation: 3,
+	},
+	realCover: {
+		paddingHorizontal: 0,
+		paddingVertical: 0,
+	},
+	coverImage: {
+		width: "100%",
+		height: "100%",
 	},
 	coverAccent: {
 		position: "absolute",
