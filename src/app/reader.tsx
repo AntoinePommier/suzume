@@ -1,7 +1,13 @@
 import { Reader } from "@epubjs-react-native/core";
 import { router, useLocalSearchParams } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Animated, Pressable, Text, View } from "react-native";
+import {
+	ActivityIndicator,
+	Animated,
+	Pressable,
+	Text,
+	View,
+} from "react-native";
 import { getBookById } from "@/books";
 import {
 	DictionaryBottomSheet,
@@ -23,6 +29,11 @@ import {
 	readerContentPaddingTop,
 	readerTheme,
 } from "@/features/reader/readerTheme";
+import {
+	getReadingProgressState,
+	markBookOpened,
+	saveReadingProgress,
+} from "@/features/reader/readingProgressStorage";
 import { createReaderBackgroundScript } from "@/features/reader/scripts/readerBackgroundScript";
 import { createRenderedPaginationScript } from "@/features/reader/scripts/renderedPaginationScript";
 import { rtlSwipeScript } from "@/features/reader/scripts/rtlSwipeScript";
@@ -36,6 +47,8 @@ const idleDictionaryLookupResult: DictionaryLookupResult = {
 	matchedText: "",
 	entries: [],
 };
+const progressSaveDelayMs = 900;
+const resumeVisibilityFallbackDelayMs = 1400;
 
 export default function ReaderScreen() {
 	const { bookId } = useLocalSearchParams<{ bookId?: string }>();
@@ -49,8 +62,25 @@ export default function ReaderScreen() {
 		useState<DictionaryLookupResult>(idleDictionaryLookupResult);
 	const [currentReaderLocation, setCurrentReaderLocation] =
 		useState<ReaderLocation | null>(null);
+	const [initialReaderLocation, setInitialReaderLocation] = useState<
+		string | null
+	>(null);
+	const [isInitialReaderLocationLoaded, setIsInitialReaderLocationLoaded] =
+		useState(false);
+	const [isReaderContentVisible, setIsReaderContentVisible] = useState(false);
 	const dictionaryLookupRequestId = useRef(0);
 	const currentReaderLocationKey = useRef<string | null>(null);
+	const progressSaveTimeout = useRef<ReturnType<typeof setTimeout> | null>(
+		null,
+	);
+	const pendingProgressSave = useRef<{
+		bookId: string;
+		location: string;
+		progress?: number | null;
+	} | null>(null);
+	const resumeVisibilityFallbackTimeout = useRef<ReturnType<
+		typeof setTimeout
+	> | null>(null);
 	const injectReaderJavascript = useRef<((script: string) => void) | null>(
 		null,
 	);
@@ -148,6 +178,31 @@ export default function ReaderScreen() {
 		clearDictionaryHighlight();
 	}, [clearDictionaryHighlight]);
 
+	const scheduleReadingProgressSave = useCallback(
+		(progress: {
+			bookId: string;
+			location: string;
+			progress?: number | null;
+		}) => {
+			if (progressSaveTimeout.current) {
+				clearTimeout(progressSaveTimeout.current);
+			}
+
+			pendingProgressSave.current = progress;
+
+			progressSaveTimeout.current = setTimeout(() => {
+				progressSaveTimeout.current = null;
+				const pendingProgress = pendingProgressSave.current;
+				pendingProgressSave.current = null;
+
+				if (pendingProgress) {
+					saveReadingProgress(pendingProgress).catch(() => undefined);
+				}
+			}, progressSaveDelayMs);
+		},
+		[],
+	);
+
 	const handleReaderBackgroundTap = useCallback(() => {
 		if (dictionarySelection) {
 			closeDictionary();
@@ -157,12 +212,31 @@ export default function ReaderScreen() {
 		setReaderControlsVisible((isVisible) => !isVisible);
 	}, [closeDictionary, dictionarySelection, setReaderControlsVisible]);
 
+	const flushPendingProgressSave = useCallback(() => {
+		if (progressSaveTimeout.current) {
+			clearTimeout(progressSaveTimeout.current);
+			progressSaveTimeout.current = null;
+		}
+
+		const pendingProgress = pendingProgressSave.current;
+		pendingProgressSave.current = null;
+
+		if (pendingProgress) {
+			saveReadingProgress(pendingProgress).catch(() => undefined);
+		}
+	}, []);
+
 	const handleLocationChange = useCallback(
-		(_totalLocations: number, currentLocation: ReaderLocation) => {
+		(
+			_totalLocations: number,
+			currentLocation: ReaderLocation,
+			_progress?: number,
+		) => {
 			setCurrentReaderLocation(currentLocation);
 
+			const location = currentLocation?.start?.cfi;
 			const locationKey = [
-				currentLocation?.start?.cfi,
+				location,
 				currentLocation?.end?.cfi,
 				currentLocation?.start?.href,
 				currentLocation?.start?.index,
@@ -183,8 +257,35 @@ export default function ReaderScreen() {
 			}
 
 			currentReaderLocationKey.current = locationKey;
+
+			if (location) {
+				if (!initialReaderLocation || location === initialReaderLocation) {
+					setIsReaderContentVisible(true);
+				}
+
+				if (
+					initialReaderLocation &&
+					!isReaderContentVisible &&
+					location !== initialReaderLocation
+				) {
+					return;
+				}
+
+				scheduleReadingProgressSave({
+					bookId: selectedBook.id,
+					location,
+					progress: null,
+				});
+			}
 		},
-		[closeDictionary, setReaderControlsVisible],
+		[
+			closeDictionary,
+			initialReaderLocation,
+			isReaderContentVisible,
+			scheduleReadingProgressSave,
+			selectedBook.id,
+			setReaderControlsVisible,
+		],
 	);
 
 	const handleWebViewMessage = useCallback(
@@ -251,18 +352,120 @@ export default function ReaderScreen() {
 			return;
 		}
 
+		flushPendingProgressSave();
+
 		closeDictionary();
 		setCurrentReaderLocation(null);
+		setInitialReaderLocation(null);
+		setIsInitialReaderLocationLoaded(false);
+		setIsReaderContentVisible(false);
 		setRenderedPagination({ status: "idle" });
 		setReaderControlsVisible(false);
 		setPageIndicatorExpanded(false);
 		currentReaderLocationKey.current = null;
 	}, [
 		closeDictionary,
+		flushPendingProgressSave,
 		selectedBook.asset,
 		setPageIndicatorExpanded,
 		setReaderControlsVisible,
 		setRenderedPagination,
+	]);
+
+	useEffect(() => {
+		let isMounted = true;
+
+		getReadingProgressState()
+			.then((progressState) => {
+				if (!isMounted) {
+					return;
+				}
+
+				setInitialReaderLocation(
+					progressState.byBookId[selectedBook.id]?.location ?? null,
+				);
+				setIsInitialReaderLocationLoaded(true);
+				setIsReaderContentVisible(
+					!progressState.byBookId[selectedBook.id]?.location,
+				);
+				markBookOpened(selectedBook.id).catch(() => undefined);
+			})
+			.catch(() => {
+				if (!isMounted) {
+					return;
+				}
+
+				setInitialReaderLocation(null);
+				setIsInitialReaderLocationLoaded(true);
+				setIsReaderContentVisible(true);
+			});
+
+		return () => {
+			isMounted = false;
+			flushPendingProgressSave();
+		};
+	}, [flushPendingProgressSave, selectedBook.id]);
+
+	useEffect(() => {
+		if (!bookUri || !isInitialReaderLocationLoaded) {
+			return;
+		}
+
+		if (!initialReaderLocation) {
+			setIsReaderContentVisible(true);
+			return;
+		}
+
+		setIsReaderContentVisible(false);
+
+		if (resumeVisibilityFallbackTimeout.current) {
+			clearTimeout(resumeVisibilityFallbackTimeout.current);
+		}
+
+		resumeVisibilityFallbackTimeout.current = setTimeout(() => {
+			resumeVisibilityFallbackTimeout.current = null;
+			setIsReaderContentVisible(true);
+		}, resumeVisibilityFallbackDelayMs);
+
+		return () => {
+			if (resumeVisibilityFallbackTimeout.current) {
+				clearTimeout(resumeVisibilityFallbackTimeout.current);
+				resumeVisibilityFallbackTimeout.current = null;
+			}
+		};
+	}, [bookUri, initialReaderLocation, isInitialReaderLocationLoaded]);
+
+	useEffect(() => {
+		const location = currentReaderLocation?.start?.cfi;
+
+		if (
+			!isReaderContentVisible ||
+			!location ||
+			!renderedPageIndicator ||
+			renderedPageIndicator.totalPages <= 0
+		) {
+			return;
+		}
+
+		const renderedProgress =
+			(renderedPageIndicator.currentPage / renderedPageIndicator.totalPages) *
+			100;
+
+		if (!Number.isFinite(renderedProgress)) {
+			return;
+		}
+
+		scheduleReadingProgressSave({
+			bookId: selectedBook.id,
+			location,
+			progress: renderedProgress,
+		});
+	}, [
+		currentReaderLocation?.start?.cfi,
+		isReaderContentVisible,
+		renderedPageIndicator,
+		scheduleReadingProgressSave,
+		selectedBook.id,
 	]);
 
 	return (
@@ -325,7 +528,7 @@ export default function ReaderScreen() {
 				</Pressable>
 			</Animated.View>
 
-			{bookUri ? (
+			{bookUri && isInitialReaderLocationLoaded ? (
 				<View
 					style={{
 						flex: 1,
@@ -363,6 +566,7 @@ export default function ReaderScreen() {
 						flow="paginated"
 						spread="none"
 						enableSwipe={readingDirection === "ltr"}
+						initialLocation={initialReaderLocation ?? undefined}
 						defaultTheme={readerTheme}
 						renderLoadingFileComponent={() => (
 							<View
@@ -391,6 +595,35 @@ export default function ReaderScreen() {
 						onWebViewMessage={handleWebViewMessage}
 					/>
 
+					{isReaderContentVisible ? null : (
+						<View
+							pointerEvents="none"
+							style={{
+								position: "absolute",
+								top: readerContentPaddingTop,
+								right: 0,
+								bottom: readerContentPaddingBottom,
+								left: 0,
+								alignItems: "center",
+								justifyContent: "center",
+								backgroundColor: currentReaderTheme.background,
+							}}
+						>
+							<ActivityIndicator color={currentReaderTheme.text} size="small" />
+							<Text
+								style={{
+									marginTop: 10,
+									color: currentReaderTheme.text,
+									fontSize: 12,
+									fontWeight: "500",
+									opacity: 0.45,
+								}}
+							>
+								Resuming…
+							</Text>
+						</View>
+					)}
+
 					<View
 						pointerEvents="none"
 						style={{
@@ -417,7 +650,7 @@ export default function ReaderScreen() {
 						</Text>
 					</View>
 
-					{renderedPageIndicator ? (
+					{isReaderContentVisible && renderedPageIndicator ? (
 						<Animated.View
 							pointerEvents="none"
 							style={{

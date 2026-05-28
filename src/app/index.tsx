@@ -1,4 +1,4 @@
-import { router } from "expo-router";
+import { router, useFocusEffect } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useCallback, useState } from "react";
 import {
@@ -12,6 +12,12 @@ import {
 import { SafeAreaView } from "react-native-safe-area-context";
 import { type Book, books } from "@/books";
 import { useBookCovers } from "@/features/reader/hooks/useBookCovers";
+import {
+	getReadingProgressState,
+	normalizeReadingProgress,
+	type ReadingProgressState,
+	type StoredReadingProgress,
+} from "@/features/reader/readingProgressStorage";
 import { colors, radius, spacing } from "@/theme";
 
 function getCoverAccent(book: Book) {
@@ -81,12 +87,16 @@ const emptyBookSlotIds = [
 function BookCard({
 	book,
 	coverUri,
+	progress,
 	width,
 }: {
 	book: Book;
 	coverUri: string | null | undefined;
+	progress: StoredReadingProgress | undefined;
 	width: number;
 }) {
+	const progressPercent = getProgressPercent(progress);
+
 	return (
 		<Pressable
 			style={({ pressed }) => [
@@ -105,6 +115,9 @@ function BookCard({
 			<Text numberOfLines={2} style={styles.bookTitle}>
 				{book.title}
 			</Text>
+			{progressPercent !== null ? (
+				<ProgressBar progress={progressPercent} />
+			) : null}
 		</Pressable>
 	);
 }
@@ -117,10 +130,97 @@ function EmptyBookSlot({ width }: { width: number }) {
 	);
 }
 
+function getProgressPercent(progress: StoredReadingProgress | undefined) {
+	return normalizeReadingProgress(progress?.progress);
+}
+
+function ProgressBar({ progress }: { progress: number }) {
+	return (
+		<View style={styles.progressTrack}>
+			<View style={[styles.progressFill, { width: `${progress}%` }]} />
+		</View>
+	);
+}
+
+function ContinueCard({
+	book,
+	coverUri,
+	height,
+	progress,
+}: {
+	book: Book | undefined;
+	coverUri: string | null | undefined;
+	height: number;
+	progress: StoredReadingProgress | undefined;
+}) {
+	const progressPercent = getProgressPercent(progress);
+
+	if (!book) {
+		return (
+			<View style={[styles.emptyRecentCard, { height }]}>
+				<View style={styles.emptyIcon}>
+					<Text style={styles.emptyIconText}>□</Text>
+				</View>
+				<View style={styles.emptyCopy}>
+					<Text style={styles.emptyTitle}>No recent book yet</Text>
+					<Text style={styles.emptyDescription}>
+						Choose a book from your library to start reading.
+					</Text>
+				</View>
+			</View>
+		);
+	}
+
+	return (
+		<Pressable
+			style={({ pressed }) => [
+				styles.continueCard,
+				{ height },
+				pressed ? styles.continueCardPressed : null,
+			]}
+			onPress={() =>
+				router.push({
+					pathname: "./reader",
+					params: { bookId: book.id },
+				})
+			}
+		>
+			<View style={styles.continueCover}>
+				<BookCover book={book} coverUri={coverUri} />
+			</View>
+			<View style={styles.continueCopy}>
+				<Text numberOfLines={2} style={styles.continueTitle}>
+					{book.title}
+				</Text>
+				<Text numberOfLines={2} style={styles.continueSubtitle}>
+					{book.subtitle}
+				</Text>
+				{progressPercent !== null ? (
+					<View style={styles.continueProgress}>
+						<Text style={styles.continueProgressText}>
+							{Math.round(progressPercent)}% read
+						</Text>
+						<ProgressBar progress={progressPercent} />
+					</View>
+				) : null}
+				<Text style={styles.continueAction}>Continue reading</Text>
+			</View>
+		</Pressable>
+	);
+}
+
 export default function HomeScreen() {
 	const handlePlaceholderAction = useCallback(() => undefined, []);
 	const { height, width } = useWindowDimensions();
+	const [readingProgress, setReadingProgress] =
+		useState<ReadingProgressState | null>(null);
 	const coverUris = useBookCovers(books);
+	const lastOpenedBook = books.find(
+		(book) => book.id === readingProgress?.lastOpenedBookId,
+	);
+	const lastOpenedProgress = lastOpenedBook
+		? readingProgress?.byBookId[lastOpenedBook.id]
+		: undefined;
 	const continueCardHeight = Math.max(
 		168,
 		Math.min(214, Math.round(height * 0.24)),
@@ -132,6 +232,28 @@ export default function HomeScreen() {
 	const emptySlotIds = emptyBookSlotIds.slice(
 		0,
 		Math.max(0, librarySlotCount - books.length),
+	);
+
+	useFocusEffect(
+		useCallback(() => {
+			let isActive = true;
+
+			getReadingProgressState()
+				.then((progressState) => {
+					if (isActive) {
+						setReadingProgress(progressState);
+					}
+				})
+				.catch(() => {
+					if (isActive) {
+						setReadingProgress(null);
+					}
+				});
+
+			return () => {
+				isActive = false;
+			};
+		}, []),
 	);
 
 	return (
@@ -174,19 +296,12 @@ export default function HomeScreen() {
 				</View>
 
 				<View style={styles.continueSection}>
-					<View
-						style={[styles.emptyRecentCard, { height: continueCardHeight }]}
-					>
-						<View style={styles.emptyIcon}>
-							<Text style={styles.emptyIconText}>□</Text>
-						</View>
-						<View style={styles.emptyCopy}>
-							<Text style={styles.emptyTitle}>No recent book yet</Text>
-							<Text style={styles.emptyDescription}>
-								Choose a book from your library to start reading.
-							</Text>
-						</View>
-					</View>
+					<ContinueCard
+						book={lastOpenedBook}
+						coverUri={lastOpenedBook ? coverUris[lastOpenedBook.id] : null}
+						height={continueCardHeight}
+						progress={lastOpenedProgress}
+					/>
 				</View>
 
 				<View style={styles.section}>
@@ -197,6 +312,7 @@ export default function HomeScreen() {
 								key={book.id}
 								book={book}
 								coverUri={coverUris[book.id]}
+								progress={readingProgress?.byBookId[book.id]}
 								width={bookCardWidth}
 							/>
 						))}
@@ -321,6 +437,54 @@ const styles = StyleSheet.create({
 		lineHeight: 18,
 		textAlign: "center",
 	},
+	continueCard: {
+		flexDirection: "row",
+		alignItems: "center",
+		gap: spacing.md,
+		paddingHorizontal: spacing.md,
+		paddingVertical: spacing.md,
+		backgroundColor: colors.surface,
+		borderWidth: StyleSheet.hairlineWidth,
+		borderColor: colors.border,
+		borderRadius: radius.lg,
+	},
+	continueCardPressed: {
+		opacity: 0.86,
+	},
+	continueCover: {
+		width: 78,
+	},
+	continueCopy: {
+		flex: 1,
+	},
+	continueTitle: {
+		color: colors.text,
+		fontSize: 16,
+		fontWeight: "700",
+		lineHeight: 20,
+	},
+	continueSubtitle: {
+		marginTop: 3,
+		color: colors.textMuted,
+		fontSize: 12,
+		fontWeight: "500",
+		lineHeight: 16,
+	},
+	continueProgress: {
+		marginTop: spacing.sm,
+	},
+	continueProgressText: {
+		marginBottom: spacing.xs,
+		color: colors.paperMuted,
+		fontSize: 11,
+		fontWeight: "600",
+	},
+	continueAction: {
+		marginTop: spacing.sm,
+		color: colors.accentSoft,
+		fontSize: 12,
+		fontWeight: "700",
+	},
 	libraryGrid: {
 		flexDirection: "row",
 		flexWrap: "wrap",
@@ -409,5 +573,17 @@ const styles = StyleSheet.create({
 		fontSize: 11,
 		fontWeight: "600",
 		lineHeight: 14,
+	},
+	progressTrack: {
+		height: 2,
+		marginTop: spacing.xs,
+		overflow: "hidden",
+		borderRadius: radius.sm,
+		backgroundColor: colors.surfaceSoft,
+	},
+	progressFill: {
+		height: "100%",
+		borderRadius: radius.sm,
+		backgroundColor: colors.accentSoft,
 	},
 });
