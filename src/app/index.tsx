@@ -3,6 +3,7 @@ import { StatusBar } from "expo-status-bar";
 import { Clock, Plus, Settings } from "lucide-react-native";
 import { useCallback, useState } from "react";
 import {
+	Alert,
 	Image,
 	Pressable,
 	StyleSheet,
@@ -11,7 +12,8 @@ import {
 	View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { type Book, books } from "@/books";
+import type { Book } from "@/books";
+import { useLibraryBooks } from "@/features/library/useLibraryBooks";
 import { useBookCovers } from "@/features/reader/hooks/useBookCovers";
 import {
 	getReadingProgressState,
@@ -103,10 +105,12 @@ function BookCard({
 	book,
 	coverUri,
 	progress,
+	onDelete,
 	width,
 }: {
 	book: Book;
 	coverUri: string | null | undefined;
+	onDelete?: (book: Book) => void;
 	progress: StoredReadingProgress | undefined;
 	width: number;
 }) {
@@ -124,6 +128,9 @@ function BookCard({
 					pathname: "./reader",
 					params: { bookId: book.id },
 				})
+			}
+			onLongPress={
+				book.source === "imported" ? () => onDelete?.(book) : undefined
 			}
 		>
 			<BookCover book={book} coverUri={coverUri} />
@@ -249,6 +256,14 @@ export default function HomeScreen() {
 	const { height, width } = useWindowDimensions();
 	const [readingProgress, setReadingProgress] =
 		useState<ReadingProgressState | null>(null);
+	const {
+		books,
+		deleteBook,
+		importBook,
+		isImporting,
+		reload: reloadLibraryBooks,
+	} = useLibraryBooks();
+	const visibleBooks = books.slice(0, librarySlotCount);
 	const coverUris = useBookCovers(books);
 	const lastOpenedBook = books.find(
 		(book) => book.id === readingProgress?.lastOpenedBookId,
@@ -266,13 +281,66 @@ export default function HomeScreen() {
 	);
 	const emptySlotIds = emptyBookSlotIds.slice(
 		0,
-		Math.max(0, librarySlotCount - books.length),
+		Math.max(0, librarySlotCount - visibleBooks.length),
+	);
+	const handleImportBook = useCallback(() => {
+		if (isImporting) {
+			return;
+		}
+
+		importBook().catch(() => undefined);
+	}, [importBook, isImporting]);
+	const refreshReadingProgress = useCallback(() => {
+		return getReadingProgressState()
+			.then((progressState) => {
+				setReadingProgress(progressState);
+			})
+			.catch(() => {
+				setReadingProgress(null);
+			});
+	}, []);
+	const handleDeleteBook = useCallback(
+		(book: Book) => {
+			if (book.source !== "imported") {
+				return;
+			}
+
+			Alert.alert(
+				"Delete book?",
+				`Remove “${book.title}” from your local library?`,
+				[
+					{
+						style: "cancel",
+						text: "Cancel",
+					},
+					{
+						onPress: () => {
+							deleteBook(book.id)
+								.then((result) => {
+									if (result.status === "deleted") {
+										return refreshReadingProgress();
+									}
+
+									Alert.alert("Unable to delete book", result.error);
+								})
+								.catch(() => {
+									Alert.alert("Unable to delete book");
+								});
+						},
+						style: "destructive",
+						text: "Delete",
+					},
+				],
+			);
+		},
+		[deleteBook, refreshReadingProgress],
 	);
 
 	useFocusEffect(
 		useCallback(() => {
 			let isActive = true;
 
+			reloadLibraryBooks().catch(() => undefined);
 			getReadingProgressState()
 				.then((progressState) => {
 					if (isActive) {
@@ -288,7 +356,7 @@ export default function HomeScreen() {
 			return () => {
 				isActive = false;
 			};
-		}, []),
+		}, [reloadLibraryBooks]),
 	);
 
 	return (
@@ -324,7 +392,8 @@ export default function HomeScreen() {
 							<Pressable
 								accessibilityRole="button"
 								accessibilityLabel="Import book"
-								onPress={handlePlaceholderAction}
+								disabled={isImporting}
+								onPress={handleImportBook}
 								style={({ pressed }) => [
 									styles.headerActionHitTarget,
 									pressed ? styles.headerActionPressed : null,
@@ -355,11 +424,12 @@ export default function HomeScreen() {
 				<View style={styles.section}>
 					<Text style={styles.sectionTitle}>Library</Text>
 					<View style={styles.libraryGrid}>
-						{books.map((book) => (
+						{visibleBooks.map((book) => (
 							<BookCard
 								key={book.id}
 								book={book}
 								coverUri={coverUris[book.id]}
+								onDelete={handleDeleteBook}
 								progress={readingProgress?.byBookId[book.id]}
 								width={bookCardWidth}
 							/>

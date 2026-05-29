@@ -10,14 +10,53 @@ function getAssetFingerprint(asset: Asset) {
 	return [asset.hash, asset.name, asset.type].filter(Boolean).join("-") || "v1";
 }
 
+function getBookCoverCacheKey(book: Book) {
+	return book.source === "imported"
+		? `${book.id}:${book.fingerprint}`
+		: book.id;
+}
+
 async function loadBookCover(book: Book) {
-	const cachedCover = coverCache.get(book.id);
+	const cacheKey = getBookCoverCacheKey(book);
+	const cachedCover = coverCache.get(cacheKey);
 
 	if (cachedCover) {
-		return cachedCover;
+		const cachedCoverUri = await cachedCover;
+
+		if (!cachedCoverUri) {
+			return null;
+		}
+
+		const cachedCoverInfo = await ExpoFileSystem.getInfoAsync(cachedCoverUri);
+
+		if (cachedCoverInfo.exists && !cachedCoverInfo.isDirectory) {
+			return cachedCoverUri;
+		}
+
+		coverCache.delete(cacheKey);
+
+		return loadBookCover(book);
 	}
 
 	const coverPromise = (async () => {
+		if (book.source === "imported") {
+			const bookInfo = await ExpoFileSystem.getInfoAsync(book.fileUri);
+
+			if (!bookInfo.exists || bookInfo.isDirectory) {
+				return null;
+			}
+
+			const bookBase64 = await ExpoFileSystem.readAsStringAsync(book.fileUri, {
+				encoding: "base64",
+			});
+
+			return getCachedOrExtractedEpubCoverUri({
+				assetFingerprint: book.fingerprint,
+				bookBase64,
+				bookId: book.id,
+			});
+		}
+
 		const bookAsset = Asset.fromModule(book.asset);
 		await bookAsset.downloadAsync();
 
@@ -39,9 +78,17 @@ async function loadBookCover(book: Book) {
 		});
 	})();
 
-	coverCache.set(book.id, coverPromise);
+	coverCache.set(cacheKey, coverPromise);
 
 	return coverPromise;
+}
+
+export function clearBookCoverCacheEntry(bookId: string) {
+	for (const cacheKey of coverCache.keys()) {
+		if (cacheKey === bookId || cacheKey.startsWith(`${bookId}:`)) {
+			coverCache.delete(cacheKey);
+		}
+	}
 }
 
 export function useBookCovers(books: Book[]) {
@@ -49,6 +96,15 @@ export function useBookCovers(books: Book[]) {
 
 	useEffect(() => {
 		let isMounted = true;
+		const bookIds = new Set(books.map((book) => book.id));
+
+		setCoverUris((currentCoverUris) =>
+			Object.fromEntries(
+				Object.entries(currentCoverUris).filter(([bookId]) =>
+					bookIds.has(bookId),
+				),
+			),
+		);
 
 		for (const book of books) {
 			loadBookCover(book)

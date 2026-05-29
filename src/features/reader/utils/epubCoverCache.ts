@@ -52,6 +52,21 @@ async function getCachedCoverUri(bookId: string, assetFingerprint: string) {
 	return coverInfo.exists ? coverUri : null;
 }
 
+export async function deleteCachedEpubCover(bookId: string) {
+	const metadata = await readCachedCoverMetadata(bookId);
+
+	if (metadata) {
+		await ExpoFileSystem.deleteAsync(
+			getCoverFileUri(bookId, metadata.extension),
+			{ idempotent: true },
+		).catch(() => undefined);
+	}
+
+	await ExpoFileSystem.deleteAsync(getCoverMetadataUri(bookId), {
+		idempotent: true,
+	}).catch(() => undefined);
+}
+
 async function writeCachedCover(
 	bookId: string,
 	bookBase64: string,

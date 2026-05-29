@@ -1,10 +1,37 @@
 import { Asset } from "expo-asset";
 import * as ExpoFileSystem from "expo-file-system/legacy";
 import { useCallback, useEffect, useState } from "react";
+import type { LibraryBook } from "@/features/library/types";
 import type { ReadingDirection } from "../types";
 import { detectReadingDirection } from "../utils/detectReadingDirection";
 
-export function useBookAsset(assetModule: number) {
+async function readBookBase64(book: LibraryBook) {
+	if (book.source === "imported") {
+		const bookInfo = await ExpoFileSystem.getInfoAsync(book.fileUri);
+
+		if (!bookInfo.exists || bookInfo.isDirectory) {
+			throw new Error("Imported book file is missing");
+		}
+
+		return ExpoFileSystem.readAsStringAsync(book.fileUri, {
+			encoding: "base64",
+		});
+	}
+
+	const bookAsset = Asset.fromModule(book.asset);
+
+	await bookAsset.downloadAsync();
+
+	if (!bookAsset.localUri) {
+		throw new Error("Book asset was not downloaded locally");
+	}
+
+	return ExpoFileSystem.readAsStringAsync(bookAsset.localUri, {
+		encoding: "base64",
+	});
+}
+
+export function useBookAsset(book: LibraryBook | null) {
 	const [bookUri, setBookUri] = useState<string | null>(null);
 	const [bookError, setBookError] = useState<string | null>(null);
 	const [readingDirection, setReadingDirection] =
@@ -18,20 +45,11 @@ export function useBookAsset(assetModule: number) {
 
 		async function loadBook() {
 			try {
-				const book = Asset.fromModule(assetModule);
-
-				await book.downloadAsync();
-
-				if (!book.localUri) {
-					throw new Error("Book asset was not downloaded locally");
+				if (!book) {
+					throw new Error("Book not found");
 				}
 
-				const bookBase64 = await ExpoFileSystem.readAsStringAsync(
-					book.localUri,
-					{
-						encoding: "base64",
-					},
-				);
+				const bookBase64 = await readBookBase64(book);
 				const detectedReadingDirection =
 					await detectReadingDirection(bookBase64);
 
@@ -53,7 +71,7 @@ export function useBookAsset(assetModule: number) {
 		return () => {
 			isMounted = false;
 		};
-	}, [assetModule]);
+	}, [book]);
 
 	return { bookUri, bookError, readingDirection };
 }

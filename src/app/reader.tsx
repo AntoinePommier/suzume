@@ -8,7 +8,6 @@ import {
 	Text,
 	View,
 } from "react-native";
-import { getBookById } from "@/books";
 import {
 	DictionaryBottomSheet,
 	type DictionaryBridgeMessage,
@@ -17,6 +16,8 @@ import {
 	dictionaryTapScript,
 	lookupJapaneseTermFromSqlite,
 } from "@/features/dictionary";
+import { getLibraryBookById } from "@/features/library/libraryBooks";
+import type { LibraryBook } from "@/features/library/types";
 import {
 	useBookAsset,
 	useLegacyFileSystem,
@@ -52,10 +53,12 @@ const resumeVisibilityFallbackDelayMs = 1400;
 
 export default function ReaderScreen() {
 	const { bookId } = useLocalSearchParams<{ bookId?: string }>();
-	const selectedBook = getBookById(bookId);
-	const { bookUri, bookError, readingDirection } = useBookAsset(
-		selectedBook.asset,
+	const normalizedBookId = Array.isArray(bookId) ? bookId[0] : bookId;
+	const [selectedBook, setSelectedBook] = useState<LibraryBook | null>(null);
+	const [selectedBookError, setSelectedBookError] = useState<string | null>(
+		null,
 	);
+	const { bookUri, bookError, readingDirection } = useBookAsset(selectedBook);
 	const [dictionarySelection, setDictionarySelection] =
 		useState<DictionarySelection | null>(null);
 	const [dictionaryLookupResult, setDictionaryLookupResult] =
@@ -138,6 +141,36 @@ export default function ReaderScreen() {
 		},
 		[clearDictionaryHighlight, runReaderJavascript],
 	);
+
+	useEffect(() => {
+		let isMounted = true;
+
+		setSelectedBook(null);
+		setSelectedBookError(null);
+
+		getLibraryBookById(normalizedBookId)
+			.then((book) => {
+				if (!isMounted) {
+					return;
+				}
+
+				if (!book) {
+					setSelectedBookError("Book not found");
+					return;
+				}
+
+				setSelectedBook(book);
+			})
+			.catch(() => {
+				if (isMounted) {
+					setSelectedBookError("Unable to load book");
+				}
+			});
+
+		return () => {
+			isMounted = false;
+		};
+	}, [normalizedBookId]);
 
 	const runDictionaryLookup = useCallback(
 		async (selection: DictionarySelection) => {
@@ -259,6 +292,10 @@ export default function ReaderScreen() {
 			currentReaderLocationKey.current = locationKey;
 
 			if (location) {
+				if (!selectedBook) {
+					return;
+				}
+
 				if (!initialReaderLocation || location === initialReaderLocation) {
 					setIsReaderContentVisible(true);
 				}
@@ -283,7 +320,7 @@ export default function ReaderScreen() {
 			initialReaderLocation,
 			isReaderContentVisible,
 			scheduleReadingProgressSave,
-			selectedBook.id,
+			selectedBook,
 			setReaderControlsVisible,
 		],
 	);
@@ -348,7 +385,7 @@ export default function ReaderScreen() {
 	);
 
 	useEffect(() => {
-		if (!Number.isFinite(selectedBook.asset)) {
+		if (!selectedBook) {
 			return;
 		}
 
@@ -366,13 +403,17 @@ export default function ReaderScreen() {
 	}, [
 		closeDictionary,
 		flushPendingProgressSave,
-		selectedBook.asset,
+		selectedBook,
 		setPageIndicatorExpanded,
 		setReaderControlsVisible,
 		setRenderedPagination,
 	]);
 
 	useEffect(() => {
+		if (!selectedBook) {
+			return;
+		}
+
 		let isMounted = true;
 
 		getReadingProgressState()
@@ -404,7 +445,7 @@ export default function ReaderScreen() {
 			isMounted = false;
 			flushPendingProgressSave();
 		};
-	}, [flushPendingProgressSave, selectedBook.id]);
+	}, [flushPendingProgressSave, selectedBook]);
 
 	useEffect(() => {
 		if (!bookUri || !isInitialReaderLocationLoaded) {
@@ -439,6 +480,7 @@ export default function ReaderScreen() {
 		const location = currentReaderLocation?.start?.cfi;
 
 		if (
+			!selectedBook ||
 			!isReaderContentVisible ||
 			!location ||
 			!renderedPageIndicator ||
@@ -465,7 +507,7 @@ export default function ReaderScreen() {
 		isReaderContentVisible,
 		renderedPageIndicator,
 		scheduleReadingProgressSave,
-		selectedBook.id,
+		selectedBook,
 	]);
 
 	return (
@@ -528,7 +570,7 @@ export default function ReaderScreen() {
 				</Pressable>
 			</Animated.View>
 
-			{bookUri && isInitialReaderLocationLoaded ? (
+			{selectedBook && bookUri && isInitialReaderLocationLoaded ? (
 				<View
 					style={{
 						flex: 1,
@@ -686,7 +728,7 @@ export default function ReaderScreen() {
 					}}
 				>
 					<Text style={{ color: "white", fontSize: 18 }}>
-						{bookError ?? "Loading book..."}
+						{selectedBookError ?? bookError ?? "Loading book..."}
 					</Text>
 				</View>
 			)}
