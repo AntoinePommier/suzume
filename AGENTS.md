@@ -268,36 +268,87 @@ L'objectif du spike est de valider si `foliate-js` resout ces problemes sans qui
 - `scripts/build-foliate-bundle.js`: bundler esbuild, genere l'IIFE depuis `node_modules/foliate-js/view.js`;
 - `assets/foliate/foliate-bundle.js`: bundle IIFE genere (~317 KB); ignore par git, regenerer avec `npm run build:foliate`;
 - `src/features/reader-foliate/foliateBundle.ts`: export TypeScript de la string du bundle; genere automatiquement par le script precedent;
-- `src/features/reader-foliate/foliateReaderHtml.ts`: template HTML + script bridge WebView (open, nav, events);
-- `src/features/reader-foliate/FoliateReaderView.tsx`: composant React Native (WebView + forwardRef + postMessage);
-- `src/app/foliate-reader.tsx`: ecran spike, log panel, boutons nav;
+- `src/features/reader-foliate/foliateReaderHtml.ts`: template HTML + script bridge WebView; contient l'open, la navigation, les events, la mesure de pagination globale et le footer natif;
+- `src/features/reader-foliate/FoliateReaderView.tsx`: composant React Native (WebView + forwardRef + postMessage); expose `next`, `prev`, `goTo`, `setPagination`, `startMeasurement`;
+- `src/features/reader-foliate/pagination/foliatePaginationTypes.ts`: types `ReaderLayoutProfile`, `FoliateRenderedPagination`, `BookRuntimeState`, constante `FOLIATE_ENGINE_BUILD_ID`;
+- `src/features/reader-foliate/pagination/createFoliateLayoutKey.ts`: cle stable depuis le profil de layout (JSON trie, champs non-null);
+- `src/features/reader-foliate/pagination/foliateBookRuntimeStorage.ts`: lecture/ecriture AsyncStorage pour le cache de pagination (`suzume:book-runtime-state:v1:{bookId}`);
+- `src/app/foliate-reader.tsx`: ecran spike, orchestration de la mesure, overlay de preparation, log panel, boutons nav;
 - `src/app/index.tsx`: bouton `[DEV]` conditionnel (`__DEV__`) pour acceder au spike depuis la bibliotheque.
+
+### Architecture pagination globale
+
+La pagination globale mesure le nombre reel de pages rendues par Foliate pour chaque section du livre, puis calcule des offsets cumulatifs pour afficher un numero de page global continu.
+
+**Flux au premier chargement (cache absent) :**
+
+1. `foliate-reader.tsx` verifie le cache AsyncStorage (`getFoliatePagination`).
+2. Cache absent → `measurementState = "measuring"` → overlay "Preparation du livre…" visible.
+3. La WebView principale charge et ouvre le livre normalement.
+4. Quand `goToFraction(0)` est resolu, le bridge poste `"ready"`.
+5. RN recoit `"ready"` et appelle `window.__startMeasurement(null)` via `injectJavaScript`.
+6. Le bridge navigue sequentiellement chaque section avec `view.goTo(i)`, attend l'event `relocate` avec `section.current === i`, lit `view.renderer.pages - 2` (contenu hors sentinelles).
+7. Pendant la mesure, les events `relocated` et `loaded` vers RN sont supprimes (`isMeasuring = true`); l'utilisateur ne voit que l'overlay.
+8. Quand toutes les sections sont mesurees, le bridge poste `"pagination-ready"` avec `sectionPageCounts`, `sectionOffsets`, `totalPages`, puis navigue vers `initialCfi` (ou `goToFraction(0)`).
+9. RN stocke en AsyncStorage, injecte via `window.__setGlobalPagination(...)`, passe `measurementState = "ready"` → overlay disparait.
+
+**Flux au rechargement (cache present) :**
+
+1. Cache present → `paginationRef.current` est positionne immediatement.
+2. Quand `"ready"` arrive, `injectPagination()` injecte directement; l'overlay n'est jamais affiche.
+
+**Affichage du compteur :**
+
+- Le compteur est ecrit dans `view.renderer.feet[0].textContent` (footer natif Foliate, shadow DOM du paginator).
+- `updateFeet()` est appele par le listener `relocate` du paginator (niveau paginator, pas niveau view).
+- Formule: `globalPage = sectionOffsets[currentSectionIndex] + rawPage` (rawPage 1-base, hors sentinelles).
+- `lastDisplayedGlobalPage` est conserve en memoire; si `rawPage` est temporairement hors range pendant une transition de spine, le footer garde la derniere valeur valide plutot que de se vider.
+- Tant que `globalPagination` est `null`, le footer reste vide.
+- Seule la page courante est affichee dans l'UI; le total est dans les logs `[FOLIATE-PAGE]`.
+
+**Cache et invalidation :**
+
+- Cle de cache: `bookId + bookFingerprint + layoutKey`.
+- `layoutKey` est un JSON trie des champs non-null du `ReaderLayoutProfile` (engine, engineBuildId, viewport, pixelRatio, orientation, maxColumnCount, flow, direction, writingMode, fontFamily, fontSize, lineHeight, margin, gap, maxInlineSize, maxBlockSize).
+- `FOLIATE_ENGINE_BUILD_ID` dans `foliatePaginationTypes.ts` doit etre incremente si le bundle Foliate est regenere, si la logique de mesure change, ou si des parametres de layout qui influencent les pages changent.
+- Format AsyncStorage: `BookRuntimeState` (version 1) keye sous `suzume:book-runtime-state:v1:{bookId}`.
+
+**Piste abandonnee — deuxieme WebView cachee :**
+
+Une approche avec une deuxieme WebView Foliate en `opacity:0` pour mesurer la pagination sans toucher au reader principal a ete tentee et abandonnee. Raisons: deux instances WKWebView avec HTML Foliate lourd (~340 KB) et un livre de 3 MB ne peuvent pas charger simultanement sur iOS/RN sans defaillance silencieuse; les tentatives de sequencement n'ont pas suffi. Ne pas reintroduire cette approche sans raison forte et sans solution au probleme de chargement WKWebView.
 
 ### Etat valide au 2026-06-07
 
 - EPUB envoye en base64 depuis React Native vers la WebView: fonctionne.
 - `foliate-js` ouvre le livre et detecte `dir=rtl`.
-- `view.open(file)` parse le livre mais ne declenche pas de rendu seul.
-- Un appel explicite a `view.goToFraction(0)` est necessaire apres `open()` pour afficher le contenu.
+- `view.open(file)` parse le livre mais ne declenche pas de rendu seul; `view.goToFraction(0)` est necessaire.
 - Les events `load` et `relocate` sont bien recus.
 - Le texte japonais vertical-rl est visible.
-- L'affichage "deux colonnes" (spread) corrige via `view.renderer.setAttribute('max-column-count', '1')` sur le `<foliate-paginator>` interne.
-- Des doublons de `relocate` au meme CFI/fraction/section ont ete observes; les logs `sessionId` confirment un seul bridge et un seul listener attache: ces doublons semblent internes a la stabilisation du paginator Foliate.
-- La navigation cross-spine semble visuellement correcte (allers-retours entre sections), contrairement au comportement observe avec EPUB.js. Pas encore de compteur de page locale pour le valider formellement.
+- L'affichage deux colonnes corrige via `view.renderer.setAttribute('max-column-count', '1')`.
+- Doublons de `relocate` au meme CFI/section observes; ils semblent internes a la stabilisation du paginator; dedupliques cote RN.
+- Navigation cross-spine visuellement correcte.
+- Pagination globale mesuree et affichee dans le footer natif Foliate: fonctionne.
+- Overlay "Preparation du livre…" pendant la mesure: fonctionne.
+- Cache persistant AsyncStorage par `bookId + fingerprint + layoutKey`: fonctionne.
+- Footer stable au passage de spine (pas de clignotement grace a `lastDisplayedGlobalPage`): fonctionne.
+- Logs `[FOLIATE-PAGE] sec=N raw=p/P local=p offset=O global=G/T` visibles dans Metro.
 
 ### Points a valider
 
-- Page locale / total par section si exposable depuis Foliate.
+- Coherence des offsets au passage de spine (ex: sec=25 → sec=26 doit faire G → G+1, pas G → G+23).
 - Reprise de lecture via CFI ou locator Foliate.
 - Tap sur caractere japonais et extraction du texte.
 - Connexion au dictionnaire SQLite depuis le spike.
-- Deduplication des evenements `relocate` identiques avant toute progression/sauvegarde.
 - Tests sur plusieurs EPUB japonais differents.
 - Decision formelle: remplacement du moteur historique, fallback, ou abandon du spike.
 
 ### Consignes pour ce spike
 
-- Ne pas ajouter de nouveaux contournements EPUB.js pour RTL ou cross-spine sans justification forte; c'est precisement ce que le spike vise a eviter.
+- Ne pas toucher au lecteur historique EPUB.js (`reader.tsx`, `features/reader`, `features/dictionary`).
+- Ne pas reintroduire la deuxieme WebView de mesure (voir "Piste abandonnee" ci-dessus).
+- Ne pas reintroduire un compteur React Native overlay; le compteur doit rester dans `view.renderer.feet`.
+- Le footer doit afficher la page globale, pas `location.current`; rester vide si la pagination n'est pas prete.
+- Incrementer `FOLIATE_ENGINE_BUILD_ID` si le bundle ou la logique de mesure change, pour invalider les caches.
 - Ne pas considerer Foliate comme moteur definitif tant que tap, reprise et progression ne sont pas valides.
 - Garder le spike isole du lecteur historique pendant toute la phase d'exploration.
 - Si la migration est decidee, introduire une frontiere claire (ex: `ReaderEngine`) pour ne pas melanger les deux stacks.

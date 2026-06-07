@@ -12,25 +12,39 @@
  */
 
 import { router, useLocalSearchParams } from "expo-router";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+	PixelRatio,
 	Pressable,
 	SafeAreaView,
 	ScrollView,
 	StyleSheet,
 	Text,
+	useWindowDimensions,
 	View,
 } from "react-native";
-import type { LibraryBook } from "@/features/library/types";
 import { getLibraryBookById } from "@/features/library/libraryBooks";
+import type { LibraryBook } from "@/features/library/types";
+import { useBookAsset } from "@/features/reader/hooks/useBookAsset";
 import {
 	type FoliateMessage,
 	type FoliateReaderHandle,
 	FoliateReaderView,
 } from "@/features/reader-foliate/FoliateReaderView";
-import { useBookAsset } from "@/features/reader/hooks/useBookAsset";
+import { createFoliateLayoutKey } from "@/features/reader-foliate/pagination/createFoliateLayoutKey";
+import {
+	getFoliatePagination,
+	upsertFoliatePagination,
+} from "@/features/reader-foliate/pagination/foliateBookRuntimeStorage";
+import {
+	FOLIATE_ENGINE_BUILD_ID,
+	type FoliateRenderedPagination,
+	type ReaderLayoutProfile,
+} from "@/features/reader-foliate/pagination/foliatePaginationTypes";
 
 const MAX_LOG_LINES = 80;
+
+type MeasurementState = "idle" | "checking" | "measuring" | "ready" | "error";
 
 export default function FoliateReaderScreen() {
 	const { bookId } = useLocalSearchParams<{ bookId?: string }>();
@@ -51,6 +65,36 @@ export default function FoliateReaderScreen() {
 
 	const { bookUri, bookError } = useBookAsset(book);
 
+	const { width, height } = useWindowDimensions();
+	const pixelRatio = PixelRatio.get();
+	const viewportWidth = Math.round(width);
+	const viewportHeight = Math.round(height);
+
+	const bookFingerprint = book
+		? book.source === "imported"
+			? book.fingerprint
+			: book.id
+		: null;
+
+	const layoutProfile = useMemo<ReaderLayoutProfile | null>(() => {
+		if (!book) return null;
+		return {
+			engine: "foliate",
+			engineBuildId: FOLIATE_ENGINE_BUILD_ID,
+			viewportWidth,
+			viewportHeight,
+			pixelRatio,
+			orientation: viewportWidth < viewportHeight ? "portrait" : "landscape",
+			maxColumnCount: 1,
+			flow: "paginated",
+		};
+	}, [book, viewportWidth, viewportHeight, pixelRatio]);
+
+	const layoutKey = useMemo(
+		() => (layoutProfile ? createFoliateLayoutKey(layoutProfile) : null),
+		[layoutProfile],
+	);
+
 	const readerRef = useRef<FoliateReaderHandle>(null);
 	const logIdRef = useRef(0);
 	const [logs, setLogs] = useState<{ id: number; text: string }[]>([
@@ -58,6 +102,21 @@ export default function FoliateReaderScreen() {
 	]);
 	const [lastCfi, setLastCfi] = useState<string | null>(null);
 	const [showLogs, setShowLogs] = useState(true);
+
+	const [measurementState, setMeasurementStateInner] =
+		useState<MeasurementState>("idle");
+	const measurementStateRef = useRef<MeasurementState>("idle");
+	const updateMeasurementState = useCallback((s: MeasurementState) => {
+		measurementStateRef.current = s;
+		setMeasurementStateInner(s);
+	}, []);
+
+	// Stable refs to avoid stale closures in callbacks.
+	const readerReadyRef = useRef(false);
+	const paginationRef = useRef<{
+		sectionOffsets: Record<number, number>;
+		totalPages: number;
+	} | null>(null);
 
 	const addLog = useCallback((line: string) => {
 		const id = ++logIdRef.current;
@@ -67,27 +126,143 @@ export default function FoliateReaderScreen() {
 		});
 	}, []);
 
+	const injectPagination = useCallback(() => {
+		if (readerReadyRef.current && paginationRef.current) {
+			readerRef.current?.setPagination(
+				paginationRef.current.sectionOffsets,
+				paginationRef.current.totalPages,
+			);
+		}
+	}, []);
+
+	// Check AsyncStorage for a cached pagination result once book + layout are known.
+	useEffect(() => {
+		if (!book || !bookUri || !layoutKey || !bookFingerprint) return;
+		let active = true;
+		updateMeasurementState("checking");
+		getFoliatePagination(book.id, bookFingerprint, layoutKey)
+			.then((cached) => {
+				if (!active) return;
+				if (cached) {
+					addLog(`[FOLIATE-SPIKE] cache HIT totalPages=${cached.totalPages}`);
+					paginationRef.current = {
+						sectionOffsets: cached.sectionOffsets,
+						totalPages: cached.totalPages,
+					};
+					injectPagination();
+					updateMeasurementState("ready");
+				} else {
+					addLog("[FOLIATE-SPIKE] cache MISS — will measure after book ready");
+					updateMeasurementState("measuring");
+				}
+			})
+			.catch((e) => {
+				if (active) {
+					addLog(`[FOLIATE-SPIKE] cache error: ${String(e)}`);
+					updateMeasurementState("measuring");
+				}
+			});
+		return () => {
+			active = false;
+		};
+	}, [
+		book,
+		bookUri,
+		layoutKey,
+		bookFingerprint,
+		addLog,
+		injectPagination,
+		updateMeasurementState,
+	]);
+
+	const handlePaginationReady = useCallback(
+		(payload: {
+			sectionPageCounts: Record<number, number>;
+			sectionOffsets: Record<number, number>;
+			totalPages: number;
+		}) => {
+			addLog(
+				`[FOLIATE-SPIKE] pagination-ready totalPages=${payload.totalPages} sections=${Object.keys(payload.sectionPageCounts).length}`,
+			);
+			if (!layoutProfile || !layoutKey || !book || !bookFingerprint) {
+				addLog(
+					"[FOLIATE-SPIKE] pagination-ready: missing context — not stored",
+				);
+				return;
+			}
+			const pagination: FoliateRenderedPagination = {
+				version: 1,
+				layoutKey,
+				layoutProfile,
+				createdAt: Date.now(),
+				sectionPageCounts: payload.sectionPageCounts,
+				sectionOffsets: payload.sectionOffsets,
+				totalPages: payload.totalPages,
+			};
+			upsertFoliatePagination(book.id, bookFingerprint, pagination).catch(
+				() => {},
+			);
+			paginationRef.current = {
+				sectionOffsets: payload.sectionOffsets,
+				totalPages: payload.totalPages,
+			};
+			injectPagination();
+			addLog("[FOLIATE-SPIKE] pagination stored + injected");
+			updateMeasurementState("ready");
+		},
+		[
+			layoutProfile,
+			layoutKey,
+			book,
+			bookFingerprint,
+			addLog,
+			injectPagination,
+			updateMeasurementState,
+		],
+	);
+
 	const handleMessage = useCallback(
 		(msg: FoliateMessage) => {
 			if (msg.type === "log") {
 				console.log(msg.payload);
 				addLog(msg.payload);
 			} else if (msg.type === "error") {
-				console.error(msg.payload);
 				addLog(`ERROR: ${msg.payload}`);
 			} else if (msg.type === "loaded") {
 				addLog(`[FOLIATE-SPIKE] spine ${msg.payload.index} loaded`);
+			} else if (msg.type === "ready") {
+				readerReadyRef.current = true;
+				injectPagination();
+				if (measurementStateRef.current === "measuring") {
+					addLog("[FOLIATE-SPIKE] book ready — starting measurement");
+					readerRef.current?.startMeasurement(null);
+				} else {
+					addLog("[FOLIATE-SPIKE] book ready");
+				}
+			} else if (msg.type === "pagination-ready") {
+				handlePaginationReady(msg.payload);
+			} else if (msg.type === "pagination-error") {
+				addLog(`[FOLIATE-SPIKE] measurement error: ${msg.payload.message}`);
+				updateMeasurementState("error");
 			} else if (msg.type === "relocated") {
-				const { cfi, fraction, sectionCurrent, sectionTotal } = msg.payload;
+				const {
+					cfi,
+					fraction,
+					sectionCurrent,
+					sectionTotal,
+					locationCurrent: loc,
+					locationTotal: locTotal,
+				} = msg.payload;
 				if (cfi) setLastCfi(cfi);
 				addLog(
 					`[FOLIATE-SPIKE] relocated` +
 						` sec=${sectionCurrent}/${sectionTotal}` +
+						` loc=${loc ?? "n/a"}/${locTotal ?? "n/a"}` +
 						` frac=${fraction?.toFixed(4) ?? "n/a"}`,
 				);
 			}
 		},
-		[addLog],
+		[addLog, injectPagination, handlePaginationReady, updateMeasurementState],
 	);
 
 	if (bookError) {
@@ -117,7 +292,6 @@ export default function FoliateReaderScreen() {
 				onMessage={handleMessage}
 			/>
 
-			{/* Minimal HUD — prev/next buttons + log toggle */}
 			<SafeAreaView style={styles.hud} pointerEvents="box-none">
 				<View style={styles.navRow} pointerEvents="box-none">
 					<Pressable
@@ -170,6 +344,14 @@ export default function FoliateReaderScreen() {
 					</View>
 				)}
 			</SafeAreaView>
+
+			{/* Preparation overlay — covers the reader while pages are being measured.
+			    Placed last in JSX so it renders above the HUD. */}
+			{measurementState === "measuring" && (
+				<View style={styles.overlay}>
+					<Text style={styles.overlayText}>Préparation du livre…</Text>
+				</View>
+			)}
 		</View>
 	);
 }
@@ -246,6 +428,16 @@ const styles = StyleSheet.create({
 		fontSize: 10,
 		fontFamily: "monospace",
 		marginTop: 4,
+	},
+	overlay: {
+		...StyleSheet.absoluteFillObject,
+		backgroundColor: "#F1E2C9",
+		alignItems: "center",
+		justifyContent: "center",
+	},
+	overlayText: {
+		color: "#555",
+		fontSize: 16,
 	},
 	backBtn: {
 		marginTop: 6,

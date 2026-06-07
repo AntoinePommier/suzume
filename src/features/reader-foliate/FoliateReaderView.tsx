@@ -13,6 +13,16 @@ export type FoliateMessage =
 	| { type: "log"; payload: string }
 	| { type: "error"; payload: string }
 	| { type: "loaded"; payload: { index: number } }
+	| { type: "ready"; payload: Record<string, never> }
+	| {
+			type: "pagination-ready";
+			payload: {
+				sectionPageCounts: Record<number, number>;
+				sectionOffsets: Record<number, number>;
+				totalPages: number;
+			};
+	  }
+	| { type: "pagination-error"; payload: { message: string } }
 	| {
 			type: "relocated";
 			payload: {
@@ -21,6 +31,7 @@ export type FoliateMessage =
 				sectionCurrent: number | null;
 				sectionTotal: number | null;
 				locationCurrent: number | null;
+				locationTotal: number | null;
 			};
 	  };
 
@@ -28,6 +39,11 @@ export type FoliateReaderHandle = {
 	next: () => void;
 	prev: () => void;
 	goTo: (cfi: string) => void;
+	setPagination: (
+		sectionOffsets: Record<number, number>,
+		totalPages: number,
+	) => void;
+	startMeasurement: (initialCfi?: string | null) => void;
 };
 
 type Props = {
@@ -61,6 +77,17 @@ export const FoliateReaderView = forwardRef<FoliateReaderHandle, Props>(
 				prev: () => inject("window.__navPrev();"),
 				goTo: (cfi: string) =>
 					inject(`window.__goTo(${JSON.stringify(cfi)});`),
+				setPagination: (
+					sectionOffsets: Record<number, number>,
+					totalPages: number,
+				) =>
+					inject(
+						`window.__setGlobalPagination(${JSON.stringify({ sectionOffsets, totalPages })});`,
+					),
+				startMeasurement: (initialCfi) =>
+					inject(
+						`window.__startMeasurement(${JSON.stringify(initialCfi ?? null)});`,
+					),
 			}),
 			[inject],
 		);
