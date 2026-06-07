@@ -1,6 +1,6 @@
 # Suzume - contexte projet pour futurs agents
 
-Derniere inspection locale: 2026-06-06.
+Derniere inspection locale: 2026-06-07.
 
 Ce document decrit l'etat observe du depot. Il ne remplace pas une specification produit: si le code et ce document divergent, relire le code. Les zones incertaines sont listees en fin de fichier afin d'eviter d'inventer.
 
@@ -9,12 +9,14 @@ Ce document decrit l'etat observe du depot. Il ne remplace pas une specification
 Suzume est une application Expo / React Native de lecture d'EPUB. Le cas d'usage principal visible dans le code est la lecture d'EPUB japonais avec:
 
 - une bibliotheque locale de livres embarques et importes;
-- un lecteur EPUB pagine base sur `@epubjs-react-native/core`;
+- un lecteur EPUB pagine base sur `@epubjs-react-native/core` / EPUB.js (moteur historique);
 - une detection de direction de lecture LTR/RTL depuis les fichiers OPF;
 - une reprise de lecture par CFI EPUB;
 - une pagination globale calculee a partir du rendu reel;
 - un dictionnaire japonais integre base sur une base SQLite Jitendex embarquee;
 - une selection par tap dans le contenu WebView et affichage des resultats dans un bottom sheet.
+
+Une exploration du moteur `foliate-js` est en cours sur la branche `spike/foliate-reader`. Elle ne remplace pas le lecteur historique; voir la section "Spike moteur Foliate" ci-dessous.
 
 Le README racine est encore le README standard du template Expo; ne pas s'en servir comme documentation produit.
 
@@ -65,10 +67,12 @@ La base `jitendex.sqlite` contient les tables `dictionary_metadata`, `dictionary
 - `ReaderProvider` de `@epubjs-react-native/core`;
 - une `Stack` Expo Router sans headers.
 
-Deux routes sont declarees:
+Deux routes sont declarees sur `main`:
 
 - `index`;
 - `reader`, avec `gestureEnabled: false`.
+
+Sur la branche `spike/foliate-reader`, une troisieme route experimentale `foliate-reader` est egalement declaree, avec `gestureEnabled: false`. Elle ne remplace pas le lecteur historique et n'est accessible que via un bouton `[DEV]` conditionnel (`__DEV__`) dans l'ecran bibliotheque.
 
 ## Bibliotheque
 
@@ -244,6 +248,60 @@ La reprise de lecture masque temporairement le contenu si un CFI initial existe.
 
 `currentPage / totalPages * 100`.
 
+## Spike moteur Foliate
+
+La branche `spike/foliate-reader` explore `foliate-js` comme moteur de rendu EPUB alternatif au moteur historique `@epubjs-react-native/core` / EPUB.js.
+
+### Motivation
+
+Des tests sur des EPUB japonais vertical-rl ont revele des limites structurelles dans EPUB.js:
+
+- a la frontiere entre deux spines, `rendition.prev()` revient trop haut dans le spine precedent;
+- le CFI stocke pointe sur le debut du paragraphe et non sur la position visuelle reelle;
+- les scripts injectes necessaires (swipe RTL, fond, tap, pagination) s'accumulent et interagissent;
+- les rustines tentees (next() x missingPages, scrollBy correctif, recalcul post-relocated) ont ete jugees insatisfaisantes.
+
+L'objectif du spike est de valider si `foliate-js` resout ces problemes sans quitter l'ecosysteme Expo/React Native, et en conservant le produit existant aussi integralement que possible.
+
+### Fichiers du spike
+
+- `scripts/build-foliate-bundle.js`: bundler esbuild, genere l'IIFE depuis `node_modules/foliate-js/view.js`;
+- `assets/foliate/foliate-bundle.js`: bundle IIFE genere (~317 KB); ignore par git, regenerer avec `npm run build:foliate`;
+- `src/features/reader-foliate/foliateBundle.ts`: export TypeScript de la string du bundle; genere automatiquement par le script precedent;
+- `src/features/reader-foliate/foliateReaderHtml.ts`: template HTML + script bridge WebView (open, nav, events);
+- `src/features/reader-foliate/FoliateReaderView.tsx`: composant React Native (WebView + forwardRef + postMessage);
+- `src/app/foliate-reader.tsx`: ecran spike, log panel, boutons nav;
+- `src/app/index.tsx`: bouton `[DEV]` conditionnel (`__DEV__`) pour acceder au spike depuis la bibliotheque.
+
+### Etat valide au 2026-06-07
+
+- EPUB envoye en base64 depuis React Native vers la WebView: fonctionne.
+- `foliate-js` ouvre le livre et detecte `dir=rtl`.
+- `view.open(file)` parse le livre mais ne declenche pas de rendu seul.
+- Un appel explicite a `view.goToFraction(0)` est necessaire apres `open()` pour afficher le contenu.
+- Les events `load` et `relocate` sont bien recus.
+- Le texte japonais vertical-rl est visible.
+- L'affichage "deux colonnes" (spread) corrige via `view.renderer.setAttribute('max-column-count', '1')` sur le `<foliate-paginator>` interne.
+- Des doublons de `relocate` au meme CFI/fraction/section ont ete observes; les logs `sessionId` confirment un seul bridge et un seul listener attache: ces doublons semblent internes a la stabilisation du paginator Foliate.
+- La navigation cross-spine semble visuellement correcte (allers-retours entre sections), contrairement au comportement observe avec EPUB.js. Pas encore de compteur de page locale pour le valider formellement.
+
+### Points a valider
+
+- Page locale / total par section si exposable depuis Foliate.
+- Reprise de lecture via CFI ou locator Foliate.
+- Tap sur caractere japonais et extraction du texte.
+- Connexion au dictionnaire SQLite depuis le spike.
+- Deduplication des evenements `relocate` identiques avant toute progression/sauvegarde.
+- Tests sur plusieurs EPUB japonais differents.
+- Decision formelle: remplacement du moteur historique, fallback, ou abandon du spike.
+
+### Consignes pour ce spike
+
+- Ne pas ajouter de nouveaux contournements EPUB.js pour RTL ou cross-spine sans justification forte; c'est precisement ce que le spike vise a eviter.
+- Ne pas considerer Foliate comme moteur definitif tant que tap, reprise et progression ne sont pas valides.
+- Garder le spike isole du lecteur historique pendant toute la phase d'exploration.
+- Si la migration est decidee, introduire une frontiere claire (ex: `ReaderEngine`) pour ne pas melanger les deux stacks.
+
 ## Support RTL
 
 `detectReadingDirection.ts` detecte RTL depuis les metadonnees EPUB. Si un livre est RTL:
@@ -254,6 +312,8 @@ La reprise de lecture masque temporairement le contenu si un CFI initial existe.
 - un swipe horizontal suffisant appelle `rendition.next()` si `deltaX > 0`, sinon `rendition.prev()`.
 
 Le script se reattache sur `rendered`, `relocated`, `resized` et par intervalle.
+
+Des tests ont montre que dans certains cas RTL/vertical, `rendition.prev()` a une frontiere de spine revient trop haut dans le spine precedent. Des rustines du type `next() x missingPages`, `scrollBy` correctif ou correction post-`relocated` ont ete tentees et jugees insatisfaisantes. Le spike Foliate vise notamment a ne pas accumuler ce type de contournements.
 
 ## Dictionnaire
 
@@ -384,7 +444,7 @@ Il utilise le binaire `sqlite3` local, cree les tables runtime, extrait des glos
 
 Aucun fichier de test ou configuration Jest/Vitest n'a ete trouve dans le depot inspecte.
 
-La commande disponible pour verification generale est `npm run lint`. Je n'ai pas observe de script `typecheck` dedie.
+La commande disponible pour verification generale est `npm run lint`. Je n'ai pas observe de script `typecheck` dedie. La commande `./node_modules/.bin/tsc --noEmit` a ete utilisee ponctuellement pour verifier les types TypeScript sans compilation.
 
 Pour les changements dictionnaire, utiliser aussi:
 
@@ -414,3 +474,5 @@ Cette regeneration depend des zips locaux ignores par git et du binaire `sqlite3
 - Eviter de remplacer les regex OPF/XML par des manipulations plus fragiles; si un vrai parseur XML est ajoute, verifier Expo/React Native.
 - Avant de supprimer ou de brancher l'import Yomitan generique, decider explicitement si le projet doit rester sur `jitendex.sqlite` embarque uniquement ou supporter des dictionnaires utilisateur.
 - Si vous touchez aux assets ignores, documenter comment les recreer ou les obtenir.
+- Si vous travaillez sur `spike/foliate-reader`, relire aussi `src/features/reader-foliate/foliateReaderHtml.ts`, `FoliateReaderView.tsx` et `scripts/build-foliate-bundle.js` avant toute modification du spike.
+- Le spike Foliate doit rester separe du lecteur historique tant que la migration n'est pas decidee; ne pas importer de code du spike dans `reader.tsx` ni inversement.
