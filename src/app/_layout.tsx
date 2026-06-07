@@ -9,6 +9,10 @@ export default function RootLayout() {
 				<Stack screenOptions={{ headerShown: false }}>
 					<Stack.Screen name="index" />
 					<Stack.Screen name="reader" options={{ gestureEnabled: false }} />
+					<Stack.Screen
+						name="foliate-reader"
+						options={{ gestureEnabled: false }}
+					/>
 				</Stack>
 			</ReaderProvider>
 		</GestureHandlerRootView>

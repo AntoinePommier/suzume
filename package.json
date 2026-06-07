@@ -5,6 +5,7 @@
   "scripts": {
     "start": "expo start",
     "build:jitendex": "node ./scripts/build-jitendex-sqlite.js",
+    "build:foliate": "node ./scripts/build-foliate-bundle.js",
     "reset-project": "node ./scripts/reset-project.js",
     "android": "expo start --android",
     "ios": "expo start --ios",
@@ -50,6 +51,7 @@
   },
   "devDependencies": {
     "@types/react": "~19.2.2",
+    "foliate-js": "^1.0.1",
     "typescript": "~5.9.2"
   },
   "private": true
