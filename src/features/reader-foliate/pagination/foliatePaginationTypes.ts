@@ -1,6 +1,6 @@
 // Bump this constant whenever the measurement logic, bundle, or layout
 // defaults change in a way that would produce different page counts.
-export const FOLIATE_ENGINE_BUILD_ID = "foliate-js-spike-v3" as const;
+export const FOLIATE_ENGINE_BUILD_ID = "foliate-js-spike-v8" as const;
 
 // Parameters that fully describe a layout configuration.
 // Only include fields that are EXPLICITLY applied — omit fields whose value

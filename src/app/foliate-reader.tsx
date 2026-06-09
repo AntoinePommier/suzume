@@ -33,11 +33,14 @@ import {
 } from "@/features/reader-foliate/FoliateReaderView";
 import { createFoliateLayoutKey } from "@/features/reader-foliate/pagination/createFoliateLayoutKey";
 import {
+	getFoliateLastPosition,
 	getFoliatePagination,
+	upsertFoliateLastPosition,
 	upsertFoliatePagination,
 } from "@/features/reader-foliate/pagination/foliateBookRuntimeStorage";
 import {
 	FOLIATE_ENGINE_BUILD_ID,
+	type FoliateReadingPosition,
 	type FoliateRenderedPagination,
 	type ReaderLayoutProfile,
 } from "@/features/reader-foliate/pagination/foliatePaginationTypes";
@@ -45,6 +48,13 @@ import {
 const MAX_LOG_LINES = 80;
 
 type MeasurementState = "idle" | "checking" | "measuring" | "ready" | "error";
+
+// A CFI with a character offset (contains ":") pinpoints a text position.
+// Bare element-only CFIs (e.g. epubcfi(/6/2!/4)) are produced during layout
+// stabilisation and must not overwrite a more precise stored position.
+function isCfiPrecise(cfi: string): boolean {
+	return cfi.includes(":");
+}
 
 export default function FoliateReaderScreen() {
 	const { bookId } = useLocalSearchParams<{ bookId?: string }>();
@@ -135,16 +145,87 @@ export default function FoliateReaderScreen() {
 		}
 	}, []);
 
-	// Check AsyncStorage for a cached pagination result once book + layout are known.
+	// ── reading position persistence ─────────────────────────────────────────
+	// Position loaded from storage at startup; used to restore after "ready".
+	const savedPositionRef = useRef<FoliateReadingPosition | null>(null);
+	// Position waiting for the debounce timer to fire; flushed on unmount.
+	const pendingPositionRef = useRef<FoliateReadingPosition | null>(null);
+	const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+	// Stable refs used by the unmount flush (avoids re-running the cleanup effect).
+	const bookRef = useRef(book);
+	const bookFingerprintRef = useRef(bookFingerprint);
+	useEffect(() => {
+		bookRef.current = book;
+	}, [book]);
+	useEffect(() => {
+		bookFingerprintRef.current = bookFingerprint;
+	}, [bookFingerprint]);
+
+	// Debounced save — 800 ms after the last relocated event.
+	// Ignores imprecise CFIs (no character offset) that would overwrite a
+	// more precise stored position.
+	const scheduleSave = useCallback((position: FoliateReadingPosition) => {
+		const existing = pendingPositionRef.current ?? savedPositionRef.current;
+		if (existing && isCfiPrecise(existing.cfi) && !isCfiPrecise(position.cfi)) {
+			return;
+		}
+		pendingPositionRef.current = position;
+		if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+		saveTimerRef.current = setTimeout(() => {
+			const b = bookRef.current;
+			const fp = bookFingerprintRef.current;
+			if (b && fp) {
+				upsertFoliateLastPosition(b.id, fp, position).catch(() => {});
+			}
+			pendingPositionRef.current = null;
+			saveTimerRef.current = null;
+		}, 800);
+	}, []);
+
+	// Flush any pending save immediately on unmount (user may close right after
+	// turning a page, before the 800 ms debounce fires).
+	useEffect(() => {
+		return () => {
+			if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+			const b = bookRef.current;
+			const fp = bookFingerprintRef.current;
+			const pending = pendingPositionRef.current;
+			if (pending && b && fp) {
+				upsertFoliateLastPosition(b.id, fp, pending).catch(() => {});
+			}
+		};
+	}, []);
+	// ─────────────────────────────────────────────────────────────────────────
+
+	// Check AsyncStorage for cached pagination + last reading position once
+	// book + layout are known. Both reads share the same AsyncStorage key so
+	// we run them in parallel (Promise.all) to avoid two sequential round-trips.
 	useEffect(() => {
 		if (!book || !bookUri || !layoutKey || !bookFingerprint) return;
 		let active = true;
 		updateMeasurementState("checking");
-		getFoliatePagination(book.id, bookFingerprint, layoutKey)
-			.then((cached) => {
+		Promise.all([
+			getFoliatePagination(book.id, bookFingerprint, layoutKey),
+			getFoliateLastPosition(book.id, bookFingerprint),
+		])
+			.then(([cached, lastPos]) => {
 				if (!active) return;
+				savedPositionRef.current = lastPos;
+				if (lastPos) {
+					addLog(
+						`[FOLIATE-SPIKE] last position sec=${lastPos.sectionIndex} cfi=${lastPos.cfi.slice(0, 48)}`,
+					);
+				}
 				if (cached) {
 					addLog(`[FOLIATE-SPIKE] cache HIT totalPages=${cached.totalPages}`);
+					for (const [secStr, offset] of Object.entries(
+						cached.sectionOffsets,
+					)) {
+						const sec = Number(secStr);
+						addLog(
+							`[CACHE-TABLE] sec=${sec} content=${cached.sectionPageCounts[sec] ?? 0} offset=${offset}`,
+						);
+					}
 					paginationRef.current = {
 						sectionOffsets: cached.sectionOffsets,
 						totalPages: cached.totalPages,
@@ -234,10 +315,23 @@ export default function FoliateReaderScreen() {
 				readerReadyRef.current = true;
 				injectPagination();
 				if (measurementStateRef.current === "measuring") {
-					addLog("[FOLIATE-SPIKE] book ready — starting measurement");
-					readerRef.current?.startMeasurement(null);
+					const initialCfi = savedPositionRef.current?.cfi ?? null;
+					addLog(
+						initialCfi
+							? `[FOLIATE-SPIKE] book ready — measuring, will restore ${initialCfi.slice(0, 48)}`
+							: "[FOLIATE-SPIKE] book ready — measuring from start",
+					);
+					readerRef.current?.startMeasurement(initialCfi);
 				} else {
-					addLog("[FOLIATE-SPIKE] book ready");
+					const savedCfi = savedPositionRef.current?.cfi;
+					if (savedCfi) {
+						addLog(
+							`[FOLIATE-SPIKE] book ready — restoring ${savedCfi.slice(0, 48)}`,
+						);
+						readerRef.current?.goTo(savedCfi);
+					} else {
+						addLog("[FOLIATE-SPIKE] book ready");
+					}
 				}
 			} else if (msg.type === "pagination-ready") {
 				handlePaginationReady(msg.payload);
@@ -260,9 +354,25 @@ export default function FoliateReaderScreen() {
 						` loc=${loc ?? "n/a"}/${locTotal ?? "n/a"}` +
 						` frac=${fraction?.toFixed(4) ?? "n/a"}`,
 				);
+				// Save position (bridge already suppresses relocated during measurement,
+				// but guard here too for safety).
+				if (cfi && measurementStateRef.current !== "measuring") {
+					scheduleSave({
+						cfi,
+						fraction: fraction ?? 0,
+						sectionIndex: sectionCurrent ?? 0,
+						savedAt: Date.now(),
+					});
+				}
 			}
 		},
-		[addLog, injectPagination, handlePaginationReady, updateMeasurementState],
+		[
+			addLog,
+			injectPagination,
+			handlePaginationReady,
+			scheduleSave,
+			updateMeasurementState,
+		],
 	);
 
 	if (bookError) {

@@ -144,28 +144,56 @@ const BRIDGE = `(function () {
   // renderer.pages - 2 for each, posts "pagination-ready" when done, then
   // returns to the initial reading position. The preparation overlay on the
   // RN side covers the reader while pages flip, so the user sees nothing.
+  // measureSection: navigate to targetIndex, then poll renderer.pages across
+  // requestAnimationFrame ticks until the value is stable (same on two consecutive
+  // frames) and > 2 (actual content pages, not just the two blank sentinels).
+  // goTo().then() is not sufficient on its own: it can resolve before the paginator
+  // finishes columnize(), leaving renderer.pages=2 (sentinels only).
+  // Fallback: after MAX_FRAMES retries, use content=1 instead of 0 — a section
+  // that resolved but couldn't stabilise likely has at least one real page.
   function measureSection(targetIndex) {
+    var MAX_FRAMES = 12;
     return new Promise(function (resolve) {
-      var settled = false;
-      function cleanup() { view.removeEventListener("relocate", onRelocate); }
+      var sectionConfirmed = false;
       function onRelocate(e) {
-        var section = ((e.detail || {}).section || {});
-        if (section.current !== targetIndex || settled) return;
-        settled = true; cleanup();
-        var raw = view.renderer.pages;
-        resolve(raw > 2 ? raw - 2 : 0);
+        var sec = ((e.detail || {}).section || {}).current;
+        if (sec === targetIndex) sectionConfirmed = true;
       }
       view.addEventListener("relocate", onRelocate);
       view.goTo(targetIndex)
         .then(function () {
-          if (!settled) {
-            settled = true; cleanup();
-            var raw = view.renderer.pages;
-            resolve(raw > 2 ? raw - 2 : 0);
+          view.removeEventListener("relocate", onRelocate);
+          if (!sectionConfirmed) {
+            rnPost("log", "[MEASURE] sec=" + targetIndex + " WARNING no-relocate-confirm");
           }
+          var prevRaw = 0;
+          var attempt = 0;
+          function tick() {
+            var raw = view.renderer.pages;
+            if (raw > 2 && raw === prevRaw) {
+              resolve(raw - 2);
+              return;
+            }
+            if (attempt >= MAX_FRAMES) {
+              var content = raw > 2 ? raw - 2 : 1;
+              rnPost("log",
+                "[MEASURE] sec=" + targetIndex +
+                " WARNING unstable-or-empty rawPages=" + raw +
+                " fallback=" + content
+              );
+              resolve(content);
+              return;
+            }
+            prevRaw = raw;
+            attempt++;
+            requestAnimationFrame(tick);
+          }
+          requestAnimationFrame(tick);
         })
-        .catch(function () {
-          if (!settled) { settled = true; cleanup(); resolve(0); }
+        .catch(function (e) {
+          view.removeEventListener("relocate", onRelocate);
+          rnPost("log", "[MEASURE] sec=" + targetIndex + " goTo-error=" + String(e));
+          resolve(0);
         });
     });
   }
@@ -196,6 +224,14 @@ const BRIDGE = `(function () {
           total += sectionPageCounts[i] || 0;
         }
         rnPost("log", "[FOLIATE-SPIKE] measurement-complete totalPages=" + total);
+        // Log the full table so we can verify stability across remeasures.
+        for (var j = 0; j < totalSections; j++) {
+          rnPost("log",
+            "[MEASURE-TABLE] sec=" + j +
+            " content=" + (sectionPageCounts[j] || 0) +
+            " offset=" + (sectionOffsets[j] || 0)
+          );
+        }
         rnPost("pagination-ready", {
           sectionPageCounts: sectionPageCounts,
           sectionOffsets: sectionOffsets,

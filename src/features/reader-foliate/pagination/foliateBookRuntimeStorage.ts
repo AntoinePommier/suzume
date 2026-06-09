@@ -1,6 +1,7 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import type {
 	BookRuntimeState,
+	FoliateReadingPosition,
 	FoliateRenderedPagination,
 } from "./foliatePaginationTypes";
 
@@ -19,7 +20,10 @@ async function load(bookId: string): Promise<BookRuntimeState | null> {
 
 async function persist(state: BookRuntimeState): Promise<void> {
 	try {
-		await AsyncStorage.setItem(KEY_PREFIX + state.bookId, JSON.stringify(state));
+		await AsyncStorage.setItem(
+			KEY_PREFIX + state.bookId,
+			JSON.stringify(state),
+		);
 	} catch {
 		// Storage errors are non-fatal; pagination will be remeasured next time.
 	}
@@ -33,6 +37,30 @@ export async function getFoliatePagination(
 	const state = await load(bookId);
 	if (!state || state.bookFingerprint !== bookFingerprint) return null;
 	return state.engineStates.foliate?.paginationByLayoutKey[layoutKey] ?? null;
+}
+
+export async function getFoliateLastPosition(
+	bookId: string,
+	bookFingerprint: string,
+): Promise<FoliateReadingPosition | null> {
+	const state = await load(bookId);
+	if (!state || state.bookFingerprint !== bookFingerprint) return null;
+	return state.engineStates.foliate?.lastPosition ?? null;
+}
+
+export async function upsertFoliateLastPosition(
+	bookId: string,
+	bookFingerprint: string,
+	position: FoliateReadingPosition,
+): Promise<void> {
+	const existing = await load(bookId);
+	const base: BookRuntimeState =
+		existing?.bookFingerprint === bookFingerprint
+			? existing
+			: { version: 1, bookId, bookFingerprint, engineStates: {} };
+	const foliate = base.engineStates.foliate ?? { paginationByLayoutKey: {} };
+	foliate.lastPosition = position;
+	await persist({ ...base, engineStates: { ...base.engineStates, foliate } });
 }
 
 export async function upsertFoliatePagination(
