@@ -23,6 +23,12 @@ import {
 	View,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
+import {
+	DictionaryBottomSheet,
+	lookupJapaneseTermFromSqlite,
+	type DictionaryLookupResult,
+	type DictionarySelection,
+} from "@/features/dictionary";
 import { getLibraryBookById } from "@/features/library/libraryBooks";
 import type { LibraryBook } from "@/features/library/types";
 import { useBookAsset } from "@/features/reader/hooks/useBookAsset";
@@ -46,6 +52,12 @@ import {
 } from "@/features/reader-foliate/pagination/foliatePaginationTypes";
 
 type MeasurementState = "idle" | "checking" | "measuring" | "ready" | "error";
+
+const idleDictionaryLookupResult: DictionaryLookupResult = {
+	status: "idle",
+	matchedText: "",
+	entries: [],
+};
 
 // A CFI with a character offset (contains ":") pinpoints a text position.
 // Bare element-only CFIs (e.g. epubcfi(/6/2!/4)) are produced during layout
@@ -113,6 +125,19 @@ export default function FoliateReaderScreen() {
 	// Chrome (back button) visibility toggled by single tap.
 	const [showChrome, setShowChrome] = useState(false);
 
+	// ── dictionary ────────────────────────────────────────────────────────────
+	const [dictionarySelection, setDictionarySelection] =
+		useState<DictionarySelection | null>(null);
+	const [dictionaryLookupResult, setDictionaryLookupResult] =
+		useState<DictionaryLookupResult>(idleDictionaryLookupResult);
+	const dictionaryLookupRequestId = useRef(0);
+	// Ref shadow so handleMessage can check dict state without a dep change.
+	const dictionarySelectionRef = useRef<DictionarySelection | null>(null);
+	useEffect(() => {
+		dictionarySelectionRef.current = dictionarySelection;
+	}, [dictionarySelection]);
+	// ─────────────────────────────────────────────────────────────────────────
+
 	const measurementStateRef = useRef<MeasurementState>("idle");
 	const updateMeasurementState = useCallback((s: MeasurementState) => {
 		measurementStateRef.current = s;
@@ -137,6 +162,60 @@ export default function FoliateReaderScreen() {
 			);
 		}
 	}, []);
+
+	// ── dictionary callbacks ──────────────────────────────────────────────────
+	const clearDictionaryHighlight = useCallback(() => {
+		readerRef.current?.clearDictionaryHighlight();
+	}, []);
+
+	const highlightDictionaryMatch = useCallback(
+		(matchedText: string) => {
+			if (!matchedText) {
+				clearDictionaryHighlight();
+				return;
+			}
+			readerRef.current?.highlightDictionaryMatch(matchedText);
+		},
+		[clearDictionaryHighlight],
+	);
+
+	const closeDictionary = useCallback(() => {
+		readerRef.current?.setDictionaryOpen(false);
+		dictionaryLookupRequestId.current += 1;
+		setDictionarySelection(null);
+		setDictionaryLookupResult(idleDictionaryLookupResult);
+		clearDictionaryHighlight();
+	}, [clearDictionaryHighlight]);
+
+	const runDictionaryLookup = useCallback(
+		async (selection: DictionarySelection) => {
+			const requestId = dictionaryLookupRequestId.current + 1;
+			dictionaryLookupRequestId.current = requestId;
+			try {
+				const result = await lookupJapaneseTermFromSqlite(selection.after);
+				if (dictionaryLookupRequestId.current === requestId) {
+					setDictionaryLookupResult(result);
+					if (result.status === "results") {
+						highlightDictionaryMatch(result.matchedText);
+					} else {
+						clearDictionaryHighlight();
+					}
+				}
+			} catch {
+				if (dictionaryLookupRequestId.current === requestId) {
+					setDictionaryLookupResult({
+						status: "error",
+						matchedText: "",
+						entries: [],
+						error: "Dictionary unavailable",
+					});
+					clearDictionaryHighlight();
+				}
+			}
+		},
+		[clearDictionaryHighlight, highlightDictionaryMatch],
+	);
+	// ─────────────────────────────────────────────────────────────────────────
 
 	// ── reading position persistence ─────────────────────────────────────────
 	// Position loaded from storage at startup; used to restore after "ready".
@@ -325,8 +404,28 @@ export default function FoliateReaderScreen() {
 			} else if (msg.type === "pagination-error") {
 				addLog(`[FOLIATE-SPIKE] measurement error: ${msg.payload.message}`);
 				updateMeasurementState("error");
+			} else if (msg.type === "dictionary-tap") {
+				readerRef.current?.setDictionaryOpen(true);
+				setShowChrome(false);
+				setDictionarySelection(msg.payload);
+				setDictionaryLookupResult((current) => {
+					if (
+						current.status === "results" ||
+						current.status === "loading"
+					) {
+						return { ...current, status: "loading" };
+					}
+					return { status: "loading", matchedText: "", entries: [] };
+				});
+				runDictionaryLookup(msg.payload);
+			} else if (msg.type === "dictionary-close") {
+				closeDictionary();
 			} else if (msg.type === "reader-background-tap") {
-				setShowChrome((v) => !v);
+				if (dictionarySelectionRef.current) {
+					closeDictionary();
+				} else {
+					setShowChrome((v) => !v);
+				}
 			} else if (msg.type === "relocated") {
 				const {
 					cfi,
@@ -360,8 +459,10 @@ export default function FoliateReaderScreen() {
 		},
 		[
 			addLog,
+			closeDictionary,
 			injectPagination,
 			handlePaginationReady,
+			runDictionaryLookup,
 			scheduleSave,
 			updateMeasurementState,
 		],
@@ -409,6 +510,12 @@ export default function FoliateReaderScreen() {
 					<ActivityIndicator size="large" color="#888" />
 				</View>
 			)}
+
+			<DictionaryBottomSheet
+				selection={dictionarySelection}
+				lookupResult={dictionaryLookupResult}
+				onDismiss={closeDictionary}
+			/>
 		</View>
 	);
 }

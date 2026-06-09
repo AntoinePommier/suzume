@@ -7,6 +7,7 @@ import {
 } from "react";
 import { StyleSheet, View } from "react-native";
 import WebView, { type WebViewMessageEvent } from "react-native-webview";
+import type { DictionarySelection } from "@/features/dictionary";
 import { buildFoliateHtml } from "./foliateReaderHtml";
 
 export type FoliateMessage =
@@ -24,6 +25,8 @@ export type FoliateMessage =
 	  }
 	| { type: "pagination-error"; payload: { message: string } }
 	| { type: "reader-background-tap"; payload: Record<string, never> }
+	| { type: "dictionary-tap"; payload: DictionarySelection }
+	| { type: "dictionary-close"; payload: Record<string, never> }
 	| {
 			type: "relocated";
 			payload: {
@@ -47,6 +50,9 @@ export type FoliateReaderHandle = {
 		totalPages: number,
 	) => void;
 	startMeasurement: (initialCfi?: string | null) => void;
+	clearDictionaryHighlight: () => void;
+	highlightDictionaryMatch: (text: string) => void;
+	setDictionaryOpen: (open: boolean) => void;
 };
 
 type Props = {
@@ -91,6 +97,18 @@ export const FoliateReaderView = forwardRef<FoliateReaderHandle, Props>(
 				startMeasurement: (initialCfi) =>
 					inject(
 						`window.__startMeasurement(${JSON.stringify(initialCfi ?? null)});`,
+					),
+				clearDictionaryHighlight: () =>
+					inject(
+						"window.__suzumeClearDictionaryHighlight && window.__suzumeClearDictionaryHighlight();",
+					),
+				highlightDictionaryMatch: (text: string) =>
+					inject(
+						`window.__suzumeHighlightDictionaryMatch && window.__suzumeHighlightDictionaryMatch(${JSON.stringify(text)});`,
+					),
+				setDictionaryOpen: (open: boolean) =>
+					inject(
+						`window.__suzumeSetDictionaryOpen && window.__suzumeSetDictionaryOpen(${open});`,
 					),
 			}),
 			[inject],

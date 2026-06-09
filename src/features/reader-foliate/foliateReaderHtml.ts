@@ -32,6 +32,9 @@ const BRIDGE = `(function () {
   var isPaging = false;
   var pendingNavAction = null;
   var pagingTimeoutId = null;
+  // Mirrored from RN via window.__suzumeSetDictionaryOpen(). When true the touch
+  // handler short-circuits: taps post dictionary-close, swipes are ignored.
+  var isDictionaryOpen = false;
   // Set true to enable verbose navigation/touch diagnostics in the RN console.
   var DEBUG_NAV = false;
   function navLog(msg) { if (DEBUG_NAV) rnPost("log", msg); }
@@ -374,6 +377,261 @@ const BRIDGE = `(function () {
   var SWIPE_MIN_PX = 50;
   var SWIPE_VERT_RATIO = 1.5;
 
+  // ── dictionary tap ────────────────────────────────────────────────────────
+  // Ported from dictionaryTapScript.ts; adapted for Foliate's iframe API.
+  // getHighlightDocuments() uses view.renderer.getContents() (.doc field).
+  // All functions run inside attachTouchListeners' closure (doc is in scope).
+  var DICT_CONTEXT_RADIUS = 20;
+
+  function isDictionaryCharacter(character) {
+    if (!character || /\\s/.test(character)) return false;
+    if (/^[\\u3000-\\u303f\\u30fb\\uff00-\\uff65!"#$%&'()*+,\\-./:;<=>?@[\\]^_\`{|}~]$/.test(character)) return false;
+    return true;
+  }
+
+  function getUnicodeCharacterAtUtf16Offset(text, offset) {
+    if (!text || offset < 0 || offset >= text.length) return "";
+    var prefixLength = Array.from(text.slice(0, offset)).length;
+    return Array.from(text)[prefixLength] || "";
+  }
+
+  function cleanContextText(text) {
+    return text.replace(/\\s+/g, "");
+  }
+
+  function hasExcludedTextAncestor(node) {
+    var current = node && node.parentElement;
+    while (current) {
+      var tagName = current.tagName ? current.tagName.toLowerCase() : "";
+      if (tagName === "rt" || tagName === "rp" || tagName === "script" || tagName === "style") return true;
+      current = current.parentElement;
+    }
+    return false;
+  }
+
+  function getVisibleTextNodes(doc) {
+    var root = doc.body || doc.documentElement;
+    if (!root) return [];
+    var nf = doc.defaultView ? doc.defaultView.NodeFilter : NodeFilter;
+    var walker = doc.createTreeWalker(root, nf.SHOW_TEXT, {
+      acceptNode: function (n) {
+        if (hasExcludedTextAncestor(n)) return nf.FILTER_REJECT;
+        return cleanContextText(n.textContent || "") ? nf.FILTER_ACCEPT : nf.FILTER_REJECT;
+      }
+    });
+    var nodes = [];
+    var n = walker.nextNode();
+    while (n) { nodes.push(n); n = walker.nextNode(); }
+    return nodes;
+  }
+
+  function takeLastCharacters(text, maxLen) { return Array.from(text).slice(-maxLen).join(""); }
+  function takeFirstCharacters(text, maxLen) { return Array.from(text).slice(0, maxLen).join(""); }
+
+  function buildBeforeFromVisibleTextNodes(nodes, nodeIndex, utf16Offset) {
+    var before = cleanContextText((nodes[nodeIndex].textContent || "").slice(0, utf16Offset));
+    for (var i = nodeIndex - 1; i >= 0 && Array.from(before).length < DICT_CONTEXT_RADIUS; i--) {
+      before = cleanContextText(nodes[i].textContent || "") + before;
+    }
+    return takeLastCharacters(before, DICT_CONTEXT_RADIUS);
+  }
+
+  function buildAfterFromVisibleTextNodes(nodes, nodeIndex, utf16Offset) {
+    var after = cleanContextText((nodes[nodeIndex].textContent || "").slice(utf16Offset));
+    var maxLen = DICT_CONTEXT_RADIUS + 1;
+    for (var i = nodeIndex + 1; i < nodes.length && Array.from(after).length < maxLen; i++) {
+      after += cleanContextText(nodes[i].textContent || "");
+    }
+    return takeFirstCharacters(after, maxLen);
+  }
+
+  function buildDictionaryPayload(node, utf16Offset) {
+    var rawText = node.textContent || "";
+    var character = getUnicodeCharacterAtUtf16Offset(rawText, utf16Offset);
+    if (!isDictionaryCharacter(character) || hasExcludedTextAncestor(node)) return null;
+    var ownerDoc = node.ownerDocument || document;
+    var visNodes = getVisibleTextNodes(ownerDoc);
+    var nodeIndex = visNodes.indexOf(node);
+    if (nodeIndex < 0) return null;
+    ownerDoc.__suzumeDictionaryHighlightAnchor = { node: node, utf16Offset: utf16Offset };
+    var before = buildBeforeFromVisibleTextNodes(visNodes, nodeIndex, utf16Offset);
+    var after = buildAfterFromVisibleTextNodes(visNodes, nodeIndex, utf16Offset);
+    return { character: character, before: before, after: after, context: before + after };
+  }
+
+  function getRangeFromPoint(doc, x, y) {
+    if (doc.caretRangeFromPoint) return doc.caretRangeFromPoint(x, y);
+    if (doc.caretPositionFromPoint) {
+      var pos = doc.caretPositionFromPoint(x, y);
+      if (!pos) return null;
+      var r = doc.createRange();
+      r.setStart(pos.offsetNode, pos.offset);
+      r.collapse(true);
+      return r;
+    }
+    return null;
+  }
+
+  function rectContainsPoint(rect, x, y) {
+    return x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom;
+  }
+
+  // Verify the character at [off, off+len) in node is rendered at (x, y).
+  // Returns a tap action object or null (rect miss or empty offset).
+  function checkCharAt(doc, text, node, off, x, y) {
+    if (off < 0 || off >= text.length) return null;
+    var ch = getUnicodeCharacterAtUtf16Offset(text, off);
+    if (!ch) return null;
+    var verify = doc.createRange();
+    verify.setStart(node, off);
+    verify.setEnd(node, off + ch.length);
+    var rects = Array.from(verify.getClientRects());
+    verify.detach && verify.detach();
+    if (!rects.some(function(r) { return rectContainsPoint(r, x, y); })) return null;
+    if (isDictionaryCharacter(ch)) {
+      var payload = buildDictionaryPayload(node, off);
+      return payload ? { action: "dict", payload: payload } : { action: "text" };
+    }
+    return { action: "text" };
+  }
+
+  // Classify a tap at (x, y) into one of three actions using caretRangeFromPoint only.
+  // Returns { action: "dict", payload } | { action: "text" } | { action: "background" }
+  //   "dict"       — visible Japanese character under tap; payload ready for SQLite lookup
+  //   "text"       — visible non-lookupable text (punctuation, Latin, …); close dictionary
+  //   "background" — no visible text at tap: empty zone, off-screen Foliate column, ruby
+  //
+  // caretRangeFromPoint returns a caret BOUNDARY between two characters, not a point
+  // inside a character. For hollow glyphs (ロ, 口, 田…) tapping the hollow centre
+  // places the caret AFTER the character (at its end = start of next char). We
+  // therefore check both sides of the caret: the character starting at offset AND
+  // the character ending at offset (offset - 1 for every BMP Japanese character).
+  //
+  // Off-screen adjacent-column characters are rejected in checkCharAt because their
+  // rects lie outside the current viewport (x < 0 or x > W), never near (x, y).
+  function classifyTap(doc, x, y) {
+    var range = getRangeFromPoint(doc, x, y);
+    var node = range && range.startContainer;
+    var offset = range ? range.startOffset : -1;
+    if (!node || node.nodeType !== Node.TEXT_NODE) return { action: "background" };
+    if (hasExcludedTextAncestor(node)) return { action: "background" };
+    var text = node.textContent || "";
+    return checkCharAt(doc, text, node, offset, x, y)
+        || (offset > 0 && checkCharAt(doc, text, node, offset - 1, x, y))
+        || { action: "background" };
+  }
+
+  function getHighlightDocuments() {
+    var docs = [];
+    var contents = view.renderer.getContents();
+    for (var i = 0; i < contents.length; i++) {
+      var d = contents[i] && contents[i].doc;
+      if (d && docs.indexOf(d) < 0) docs.push(d);
+    }
+    return docs;
+  }
+
+  function ensureDictionaryHighlightStyle(doc) {
+    if (!doc || doc.getElementById("suzume-dictionary-highlight-style")) return;
+    var style = doc.createElement("style");
+    style.id = "suzume-dictionary-highlight-style";
+    style.textContent = ".suzume-dictionary-highlight{background-color:rgba(90,70,40,0.14);box-shadow:0 0 0 1px rgba(90,70,40,0.14);border-radius:2px;-webkit-box-decoration-break:clone;box-decoration-break:clone;}";
+    (doc.head || doc.documentElement).appendChild(style);
+  }
+
+  function unwrapDictionaryHighlight(hl) {
+    var parent = hl.parentNode;
+    if (!parent) return;
+    while (hl.firstChild) parent.insertBefore(hl.firstChild, hl);
+    parent.removeChild(hl);
+    parent.normalize && parent.normalize();
+  }
+
+  function clearDictionaryHighlightInDocument(doc, options) {
+    if (!doc) return;
+    var hls = Array.from(doc.querySelectorAll(".suzume-dictionary-highlight"));
+    for (var i = 0; i < hls.length; i++) unwrapDictionaryHighlight(hls[i]);
+    if (!options || options.clearAnchor !== false) doc.__suzumeDictionaryHighlightAnchor = null;
+  }
+
+  function clearDictionaryHighlights() {
+    var docs = getHighlightDocuments();
+    for (var i = 0; i < docs.length; i++) clearDictionaryHighlightInDocument(docs[i]);
+  }
+
+  function clearDictionaryHighlightSpans() {
+    var docs = getHighlightDocuments();
+    for (var i = 0; i < docs.length; i++) clearDictionaryHighlightInDocument(docs[i], { clearAnchor: false });
+  }
+
+  function collectHighlightSegments(visNodes, nodeIndex, utf16Offset, surfaceLength) {
+    var segments = [];
+    var remaining = surfaceLength;
+    for (var index = nodeIndex; index < visNodes.length && remaining > 0; index++) {
+      var node = visNodes[index];
+      var text = node.textContent || "";
+      var chars = Array.from(text);
+      var curOffset = 0;
+      var segStart = null;
+      var segEnd = null;
+      for (var ci = 0; ci < chars.length; ci++) {
+        var ch = chars[ci];
+        var nextOffset = curOffset + ch.length;
+        var isBeforeStart = index === nodeIndex && nextOffset <= utf16Offset;
+        if (!isBeforeStart && remaining > 0) {
+          if (segStart === null) segStart = Math.max(curOffset, utf16Offset);
+          segEnd = nextOffset;
+          if (!/\\s/.test(ch)) remaining--;
+        }
+        curOffset = nextOffset;
+        if (remaining <= 0) break;
+      }
+      if (segStart !== null && segEnd !== null && segEnd > segStart) {
+        segments.push({ node: node, start: segStart, end: segEnd });
+      }
+    }
+    return remaining === 0 ? segments : [];
+  }
+
+  function wrapHighlightSegment(doc, seg) {
+    var range = doc.createRange();
+    range.setStart(seg.node, seg.start);
+    range.setEnd(seg.node, seg.end);
+    var hl = doc.createElement("span");
+    hl.className = "suzume-dictionary-highlight";
+    hl.setAttribute("data-suzume-dictionary-highlight", "true");
+    hl.appendChild(range.extractContents());
+    range.insertNode(hl);
+    range.detach && range.detach();
+  }
+
+  function highlightDictionarySurface(surfaceText) {
+    var matchedText = cleanContextText(surfaceText || "");
+    clearDictionaryHighlightSpans();
+    if (!matchedText) return;
+    var docs = getHighlightDocuments();
+    for (var di = 0; di < docs.length; di++) {
+      var hDoc = docs[di];
+      var anchor = hDoc.__suzumeDictionaryHighlightAnchor;
+      if (!anchor || !anchor.node || !anchor.node.isConnected) continue;
+      var visNodes = getVisibleTextNodes(hDoc);
+      var nodeIndex = visNodes.indexOf(anchor.node);
+      if (nodeIndex < 0) continue;
+      var segments = collectHighlightSegments(
+        visNodes, nodeIndex, anchor.utf16Offset, Array.from(matchedText).length
+      );
+      if (segments.length === 0) continue;
+      ensureDictionaryHighlightStyle(hDoc);
+      for (var si = segments.length - 1; si >= 0; si--) wrapHighlightSegment(hDoc, segments[si]);
+      return;
+    }
+  }
+
+  window.__suzumeClearDictionaryHighlight = clearDictionaryHighlights;
+  window.__suzumeHighlightDictionaryMatch = highlightDictionarySurface;
+  window.__suzumeSetDictionaryOpen = function(open) { isDictionaryOpen = !!open; };
+  // ─────────────────────────────────────────────────────────────────────────
+
   function releasePaging(reason) {
     if (!isPaging) return;
     isPaging = false;
@@ -416,9 +674,28 @@ const BRIDGE = `(function () {
       var dy = t.clientY - t0Y;
       var absX = Math.abs(dx);
       var absY = Math.abs(dy);
+      if (isDictionaryOpen) {
+        if (absX <= TAP_MAX_PX && absY <= TAP_MAX_PX) {
+          rnPost("dictionary-close", {});
+        }
+        // swipes and other gestures are silently ignored while dict is open
+        return;
+      }
       if (absX <= TAP_MAX_PX && absY <= TAP_MAX_PX) {
-        navLog("[FOLIATE-TOUCH] tap background");
-        rnPost("reader-background-tap", {});
+        var tapX = t.clientX;
+        var tapY = t.clientY;
+        clearDictionaryHighlights();
+        var tap = classifyTap(doc, tapX, tapY);
+        if (tap.action === "dict") {
+          navLog("[FOLIATE-TOUCH] tap dictionary char=" + tap.payload.character);
+          rnPost("dictionary-tap", tap.payload);
+        } else if (tap.action === "text") {
+          navLog("[FOLIATE-TOUCH] tap text (non-dict)");
+          rnPost("dictionary-close", {});
+        } else {
+          navLog("[FOLIATE-TOUCH] tap background");
+          rnPost("reader-background-tap", {});
+        }
         return;
       }
       if (absX >= SWIPE_MIN_PX && absX >= absY * SWIPE_VERT_RATIO) {
