@@ -14,6 +14,7 @@
 import { router, useLocalSearchParams } from "expo-router";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
+	ActivityIndicator,
 	PixelRatio,
 	Pressable,
 	SafeAreaView,
@@ -112,13 +113,16 @@ export default function FoliateReaderScreen() {
 	]);
 	const [lastCfi, setLastCfi] = useState<string | null>(null);
 	const [showLogs, setShowLogs] = useState(true);
+	// False until the reader has navigated to its final restored position.
+	// Drives the full-screen overlay so the user never sees an intermediate page.
+	const [isReaderVisuallyReady, setIsReaderVisuallyReady] = useState(false);
+	// Set to true when a goTo/startMeasurement is in flight; cleared on first
+	// relocated event (which confirms the reader reached its final position).
+	const waitingForRestoreRef = useRef(false);
 
-	const [measurementState, setMeasurementStateInner] =
-		useState<MeasurementState>("idle");
 	const measurementStateRef = useRef<MeasurementState>("idle");
 	const updateMeasurementState = useCallback((s: MeasurementState) => {
 		measurementStateRef.current = s;
-		setMeasurementStateInner(s);
 	}, []);
 
 	// Stable refs to avoid stale closures in callbacks.
@@ -321,6 +325,7 @@ export default function FoliateReaderScreen() {
 							? `[FOLIATE-SPIKE] book ready — measuring, will restore ${initialCfi.slice(0, 48)}`
 							: "[FOLIATE-SPIKE] book ready — measuring from start",
 					);
+					waitingForRestoreRef.current = true;
 					readerRef.current?.startMeasurement(initialCfi);
 				} else {
 					const savedCfi = savedPositionRef.current?.cfi;
@@ -328,9 +333,11 @@ export default function FoliateReaderScreen() {
 						addLog(
 							`[FOLIATE-SPIKE] book ready — restoring ${savedCfi.slice(0, 48)}`,
 						);
+						waitingForRestoreRef.current = true;
 						readerRef.current?.goTo(savedCfi);
 					} else {
 						addLog("[FOLIATE-SPIKE] book ready");
+						setIsReaderVisuallyReady(true);
 					}
 				}
 			} else if (msg.type === "pagination-ready") {
@@ -348,6 +355,10 @@ export default function FoliateReaderScreen() {
 					locationTotal: locTotal,
 				} = msg.payload;
 				if (cfi) setLastCfi(cfi);
+				if (waitingForRestoreRef.current) {
+					waitingForRestoreRef.current = false;
+					setIsReaderVisuallyReady(true);
+				}
 				addLog(
 					`[FOLIATE-SPIKE] relocated` +
 						` sec=${sectionCurrent}/${sectionTotal}` +
@@ -386,21 +397,15 @@ export default function FoliateReaderScreen() {
 		);
 	}
 
-	if (!bookUri) {
-		return (
-			<SafeAreaView style={styles.center}>
-				<Text style={styles.loadingText}>[FOLIATE-SPIKE] loading EPUB...</Text>
-			</SafeAreaView>
-		);
-	}
-
 	return (
 		<View style={styles.root}>
-			<FoliateReaderView
-				ref={readerRef}
-				bookBase64={bookUri}
-				onMessage={handleMessage}
-			/>
+			{bookUri && (
+				<FoliateReaderView
+					ref={readerRef}
+					bookBase64={bookUri}
+					onMessage={handleMessage}
+				/>
+			)}
 
 			<SafeAreaView style={styles.hud} pointerEvents="box-none">
 				<View style={styles.navRow} pointerEvents="box-none">
@@ -457,9 +462,9 @@ export default function FoliateReaderScreen() {
 
 			{/* Preparation overlay — covers the reader while pages are being measured.
 			    Placed last in JSX so it renders above the HUD. */}
-			{measurementState === "measuring" && (
+			{!isReaderVisuallyReady && (
 				<View style={styles.overlay}>
-					<Text style={styles.overlayText}>Préparation du livre…</Text>
+					<ActivityIndicator size="large" color="#888" />
 				</View>
 			)}
 		</View>
@@ -483,11 +488,6 @@ const styles = StyleSheet.create({
 		fontSize: 14,
 		textAlign: "center",
 		paddingHorizontal: 20,
-	},
-	loadingText: {
-		color: "#555",
-		fontSize: 13,
-		fontFamily: "monospace",
 	},
 	hud: {
 		position: "absolute",
