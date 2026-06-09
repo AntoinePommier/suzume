@@ -17,12 +17,12 @@ import {
 	ActivityIndicator,
 	PixelRatio,
 	Pressable,
-	SafeAreaView,
 	StyleSheet,
 	Text,
 	useWindowDimensions,
 	View,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { getLibraryBookById } from "@/features/library/libraryBooks";
 import type { LibraryBook } from "@/features/library/types";
 import { useBookAsset } from "@/features/reader/hooks/useBookAsset";

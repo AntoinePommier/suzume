@@ -32,6 +32,9 @@ const BRIDGE = `(function () {
   var isPaging = false;
   var pendingNavAction = null;
   var pagingTimeoutId = null;
+  // Set true to enable verbose navigation/touch diagnostics in the RN console.
+  var DEBUG_NAV = false;
+  function navLog(msg) { if (DEBUG_NAV) rnPost("log", msg); }
   rnPost("log", "[FOLIATE-SPIKE] bridge init sessionId=" + sessionId);
 
   // Write the page counter into view.renderer.feet (Foliate's built-in footer zone).
@@ -50,7 +53,7 @@ const BRIDGE = `(function () {
       var globalPage = offset + rawPage;
       lastDisplayedGlobalPage = globalPage;
       text = String(globalPage);
-      rnPost("log",
+      navLog(
         "[FOLIATE-PAGE] sec=" + currentSectionIndex +
         " raw=" + rawPage + "/" + rawPages +
         " local=" + rawPage +
@@ -295,7 +298,7 @@ const BRIDGE = `(function () {
 
     // Diagnostic log — always, including sentinels.
     var key = (cfi || "") + "|" + (section.current != null ? section.current : "");
-    rnPost("log",
+    navLog(
       "[FOLIATE-NAV] RELOCATE-FIRE #" + relocateCount +
       " sec=" + (section.current != null ? section.current : "?") +
       " page=" + rendPage + "/" + rendPages +
@@ -312,7 +315,7 @@ const BRIDGE = `(function () {
     // On a real content page: Foliate has fully landed after navigation.
     releasePaging("relocate");
     if (key && key === lastRelocateKey) {
-      rnPost("log",
+      navLog(
         "[FOLIATE-SPIKE] relocate #" + relocateCount + " ignored (dup sid=" + sessionId + ")"
       );
       return;
@@ -327,8 +330,7 @@ const BRIDGE = `(function () {
       locationCurrent: location.current != null ? location.current : null,
       locationTotal: location.total != null ? location.total : null,
     });
-    rnPost(
-      "log",
+    navLog(
       "[FOLIATE-SPIKE] RELOCATED #" + relocateCount +
         " sid=" + sessionId +
         " sec=" + section.current + "/" + section.total +
@@ -379,7 +381,7 @@ const BRIDGE = `(function () {
       clearTimeout(pagingTimeoutId);
       pagingTimeoutId = null;
     }
-    rnPost("log",
+    navLog(
       "[FOLIATE-NAV] paging released by " + reason +
       " action=" + (pendingNavAction || "?") +
       " sec=" + currentSectionIndex +
@@ -415,18 +417,18 @@ const BRIDGE = `(function () {
       var absX = Math.abs(dx);
       var absY = Math.abs(dy);
       if (absX <= TAP_MAX_PX && absY <= TAP_MAX_PX) {
-        rnPost("log", "[FOLIATE-TOUCH] tap background");
+        navLog("[FOLIATE-TOUCH] tap background");
         rnPost("reader-background-tap", {});
         return;
       }
       if (absX >= SWIPE_MIN_PX && absX >= absY * SWIPE_VERT_RATIO) {
         if (isPaging) {
-          rnPost("log", "[FOLIATE-NAV] swipe ignored (isPaging)");
+          navLog("[FOLIATE-NAV] swipe ignored (isPaging)");
           return;
         }
         isPaging = true;
         pendingNavAction = dx > 0 ? "goLeft" : "goRight";
-        rnPost("log",
+        navLog(
           "[FOLIATE-NAV] paging locked action=" + pendingNavAction +
           " sec=" + currentSectionIndex +
           " page=" + view.renderer.page + "/" + view.renderer.pages
@@ -451,7 +453,7 @@ const BRIDGE = `(function () {
 
   function attachToAllContents() {
     var contents = view.renderer.getContents();
-    rnPost("log", "[FOLIATE-TOUCH] attached contents=" + contents.length);
+    navLog("[FOLIATE-TOUCH] attached contents=" + contents.length);
     for (var i = 0; i < contents.length; i++) {
       attachTouchListeners(contents[i].doc);
     }

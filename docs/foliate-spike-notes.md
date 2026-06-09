@@ -131,24 +131,25 @@ actuel.
 
 ### Pages sentinelles / `renderer.page` / `renderer.pages`
 
-Foliate's paginator inclut deux pages sentinelles (blanches) dans
+**RÉSOLU — voir section 8.**
+
+Foliate's paginator inclut deux pages sentinelles structurelles dans
 `renderer.pages`. Les pages de contenu réelles sont `1` à `renderer.pages -
-2`. `renderer.page` vaut `0` ou `renderer.pages - 1` dans les états
-transitoires. Le bridge en tient compte dans `updateFeet()` mais tout
-consumer de ces valeurs doit vérifier `rawPage >= 1 && rawPage <=
-contentTotal`.
+2`. `renderer.page` vaut `0` ou `renderer.pages - 1` pendant les crossings
+de spine. Le bridge filtre maintenant ces états avant de libérer `isPaging`.
 
 ### Dedup `relocate` potentiellement trop agressif
 
-Voir section 4. La clé de dedup `(cfi, section)` sans fenêtre temporelle
-peut filtrer des navigations légitimes en plus des duplicates de stabilisation.
+Non reproduit après la correction de `isPaging` (section 8). À surveiller.
 
-### Swipes rapides sans garde `isPaging`
+### Double navigation Foliate + bridge sur le même swipe
 
-Contrairement à l'ancien reader (`rtlSwipeScript.ts` avec 250 ms de garde),
-le bridge Foliate actuel n'a pas de `isPaging`. Deux swipes rapides
-successifs envoient deux `goLeft()`/`goRight()` avant que le premier relocate
-n'arrive. Effet observé : navigation chaotique, page counter incohérent.
+**RÉSOLU — voir section 8.**
+
+Foliate enregistre ses propres listeners `touchstart/touchmove/touchend` sur
+le même `contentDocument` que le bridge. Sans précaution, Foliate déclenchait
+un `snap()` concurrent avec `#goTo` sans vérifier `#locked`, pouvant détruire
+l'iframe en cours de chargement et geler `#locked` définitivement.
 
 ### Futur dictionnaire : adaptation de `dictionaryTapScript.ts`
 
@@ -164,7 +165,7 @@ différence à gérer lors de l'implémentation :
 
 ---
 
-## 4. Bug actuel : navigation bloquée après crossing de spine
+## 4. Bug résolu : navigation bloquée après crossing de spine
 
 ### Symptômes observés
 
@@ -429,3 +430,123 @@ complète de tests manuels.
   production, hors scope.
 - `src/features/reader-foliate/pagination/` : le système de pagination et
   cache fonctionne correctement, ne pas modifier sans raison précise.
+
+---
+
+## 8. Diagnostic et correction du bug de crossing (résolu)
+
+### Cause racine confirmée par inspection du code source Foliate
+
+**`paginator.js` — pages sentinelles structurelles**
+
+Le paginator Foliate ajoute systématiquement deux colonnes vides (sentinelles)
+à chaque section, indépendamment du contenu EPUB :
+
+```js
+// expand() — paginator.js
+this.#element.style[side] = `${expandedSize + this.#size * 2}px`
+// pages = pageCount + 2
+```
+
+Pages de contenu : `1..renderer.pages - 2`.
+Sentinelles : `0` (avant) et `renderer.pages - 1` (après).
+
+Confirmé par `#scrollToAnchor` (ne scroll jamais vers page < 1) et par la
+formule `fraction = (page - 1) / (pages - 2)` dans `#afterScroll`.
+
+**Séquence d'un crossing backward (depuis page=1 de sec=N) :**
+
+1. `#scrollPrev` scroll vers page=0 (sentinelle) → `#afterScroll` →
+   **relocate(sec=N, page=0)** — sentinelle, `#locked=true`
+2. `#goTo(N-1)` → iframe load → **load(N-1)**
+3. `scrollToAnchor(1)` → scroll vers page=pages-2 → **relocate(sec=N-1, page=pages-2)**
+4. `wait(100)` → `#locked=false`
+
+Le relocate intermédiaire (étape 1) est une étape **structurelle invariante**
+de tout crossing, pas un artefact de l'EPUB.
+
+**Double navigation : Foliate attache ses propres listeners touch**
+
+`paginator.js` enregistre `touchstart/touchmove/touchend` en bubble phase sur
+le même `contentDocument` que le bridge (via son propre événement `load`) :
+
+```js
+// paginator.js
+this.addEventListener('load', ({ detail: { doc } }) => {
+    doc.addEventListener('touchend', this.#onTouchEnd.bind(this))
+})
+```
+
+`#onTouchEnd` → `requestAnimationFrame(() => snap())`. Dans `snap()`, `#goTo`
+est appelé **sans vérifier `#locked`**. Au moment du rAF, l'iframe de la
+nouvelle section n'est pas encore chargée (`pages=0`), ce qui produisait
+`page >= pages-1 = -1` toujours vrai → `#goTo` concurrent → `#createView()`
+détruisait l'iframe en cours → `#turnPage` ne résolvait jamais → `#locked`
+restait `true` indéfiniment.
+
+### Corrections appliquées
+
+**1. Capture phase + `stopImmediatePropagation` dans `attachTouchListeners`**
+
+Les listeners du bridge sont maintenant en `{ capture: true }`. La capture
+précède le bubble dans le modèle DOM → nos handlers tirent en premier.
+`e.stopImmediatePropagation()` bloque ensuite `#onTouchStart`, `#onTouchMove`
+et `#onTouchEnd` de Foliate. `snap()` n'est donc jamais planifié.
+
+```js
+doc.addEventListener("touchstart", function (e) {
+  e.stopImmediatePropagation(); // bloque #onTouchStart Foliate
+  ...
+}, { capture: true, passive: true });
+doc.addEventListener("touchmove", function (e) {
+  e.stopImmediatePropagation(); // bloque #onTouchMove (scrollBy)
+}, { capture: true, passive: true });
+doc.addEventListener("touchend", function (e) {
+  e.stopImmediatePropagation(); // bloque #onTouchEnd (snap)
+  ...
+}, { capture: true, passive: true });
+```
+
+**2. Filtre sentinel dans le handler `relocate`**
+
+`isPaging` n'est libéré que sur un relocate de page de contenu :
+
+```js
+var isSentinel = rendPages <= 2 || rendPage < 1 || rendPage > rendPages - 2;
+if (isSentinel) return; // guard maintenu, relocated non posté
+releasePaging("relocate");
+```
+
+Pendant un crossing, le relocate sentinel ne libère plus le guard. La
+libération arrive uniquement après le chargement complet de la nouvelle spine
+et le scroll vers l'ancre cible.
+
+### Architecture de navigation validée
+
+```
+touch (iframe contentDocument)
+  → capture listener Suzume (touchend)
+    → stopImmediatePropagation (Foliate #onTouchEnd bloqué)
+    → isPaging guard
+    → view.goLeft() / view.goRight()
+      → Foliate #turnPage → #locked=true
+        → #scrollPrev/#scrollNext → sentinel → relocate [ignoré]
+        → #goTo(adjacent) → iframe load → load event
+        → scrollToAnchor → relocate [page de contenu]
+          → releasePaging("relocate")
+          → #locked=false (100ms plus tard)
+```
+
+Testé sur plusieurs allers-retours inter-spines, y compris des frontières
+autres que sec23/sec24, sans gel observé.
+
+### Logs en mode DEBUG_NAV=true
+
+```
+// backward crossing sec=24 page=1/25 → sec=23 page=29/31
+[FOLIATE-NAV] paging locked action=goRight sec=24 page=1/25
+[FOLIATE-NAV] RELOCATE-FIRE #N sec=24 page=0/25 [SENTINEL — guard held]
+[FOLIATE-SPIKE] LOADED spine=23
+[FOLIATE-NAV] RELOCATE-FIRE #N+1 sec=23 page=29/31
+[FOLIATE-NAV] paging released by relocate action=goRight sec=23 page=29/31
+```
