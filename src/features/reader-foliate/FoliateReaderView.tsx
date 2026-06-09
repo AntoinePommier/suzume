@@ -23,6 +23,7 @@ export type FoliateMessage =
 			};
 	  }
 	| { type: "pagination-error"; payload: { message: string } }
+	| { type: "reader-background-tap"; payload: Record<string, never> }
 	| {
 			type: "relocated";
 			payload: {
@@ -38,6 +39,8 @@ export type FoliateMessage =
 export type FoliateReaderHandle = {
 	next: () => void;
 	prev: () => void;
+	goLeft: () => void;
+	goRight: () => void;
 	goTo: (cfi: string) => void;
 	setPagination: (
 		sectionOffsets: Record<number, number>,
@@ -75,8 +78,9 @@ export const FoliateReaderView = forwardRef<FoliateReaderHandle, Props>(
 			() => ({
 				next: () => inject("window.__navNext();"),
 				prev: () => inject("window.__navPrev();"),
-				goTo: (cfi: string) =>
-					inject(`window.__goTo(${JSON.stringify(cfi)});`),
+				goLeft: () => inject("window.__navGoLeft();"),
+				goRight: () => inject("window.__navGoRight();"),
+				goTo: (cfi: string) => inject(`window.__goTo(${JSON.stringify(cfi)});`),
 				setPagination: (
 					sectionOffsets: Record<number, number>,
 					totalPages: number,

@@ -18,7 +18,6 @@ import {
 	PixelRatio,
 	Pressable,
 	SafeAreaView,
-	ScrollView,
 	StyleSheet,
 	Text,
 	useWindowDimensions,
@@ -45,8 +44,6 @@ import {
 	type FoliateRenderedPagination,
 	type ReaderLayoutProfile,
 } from "@/features/reader-foliate/pagination/foliatePaginationTypes";
-
-const MAX_LOG_LINES = 80;
 
 type MeasurementState = "idle" | "checking" | "measuring" | "ready" | "error";
 
@@ -107,18 +104,14 @@ export default function FoliateReaderScreen() {
 	);
 
 	const readerRef = useRef<FoliateReaderHandle>(null);
-	const logIdRef = useRef(0);
-	const [logs, setLogs] = useState<{ id: number; text: string }[]>([
-		{ id: 0, text: "[FOLIATE-SPIKE] waiting..." },
-	]);
-	const [lastCfi, setLastCfi] = useState<string | null>(null);
-	const [showLogs, setShowLogs] = useState(true);
 	// False until the reader has navigated to its final restored position.
 	// Drives the full-screen overlay so the user never sees an intermediate page.
 	const [isReaderVisuallyReady, setIsReaderVisuallyReady] = useState(false);
 	// Set to true when a goTo/startMeasurement is in flight; cleared on first
 	// relocated event (which confirms the reader reached its final position).
 	const waitingForRestoreRef = useRef(false);
+	// Chrome (back button) visibility toggled by single tap.
+	const [showChrome, setShowChrome] = useState(false);
 
 	const measurementStateRef = useRef<MeasurementState>("idle");
 	const updateMeasurementState = useCallback((s: MeasurementState) => {
@@ -133,11 +126,7 @@ export default function FoliateReaderScreen() {
 	} | null>(null);
 
 	const addLog = useCallback((line: string) => {
-		const id = ++logIdRef.current;
-		setLogs((prev) => {
-			const next = [...prev, { id, text: line }];
-			return next.length > MAX_LOG_LINES ? next.slice(-MAX_LOG_LINES) : next;
-		});
+		console.log(line);
 	}, []);
 
 	const injectPagination = useCallback(() => {
@@ -222,14 +211,6 @@ export default function FoliateReaderScreen() {
 				}
 				if (cached) {
 					addLog(`[FOLIATE-SPIKE] cache HIT totalPages=${cached.totalPages}`);
-					for (const [secStr, offset] of Object.entries(
-						cached.sectionOffsets,
-					)) {
-						const sec = Number(secStr);
-						addLog(
-							`[CACHE-TABLE] sec=${sec} content=${cached.sectionPageCounts[sec] ?? 0} offset=${offset}`,
-						);
-					}
 					paginationRef.current = {
 						sectionOffsets: cached.sectionOffsets,
 						totalPages: cached.totalPages,
@@ -310,7 +291,6 @@ export default function FoliateReaderScreen() {
 		(msg: FoliateMessage) => {
 			if (msg.type === "log") {
 				console.log(msg.payload);
-				addLog(msg.payload);
 			} else if (msg.type === "error") {
 				addLog(`ERROR: ${msg.payload}`);
 			} else if (msg.type === "loaded") {
@@ -345,6 +325,8 @@ export default function FoliateReaderScreen() {
 			} else if (msg.type === "pagination-error") {
 				addLog(`[FOLIATE-SPIKE] measurement error: ${msg.payload.message}`);
 				updateMeasurementState("error");
+			} else if (msg.type === "reader-background-tap") {
+				setShowChrome((v) => !v);
 			} else if (msg.type === "relocated") {
 				const {
 					cfi,
@@ -354,7 +336,6 @@ export default function FoliateReaderScreen() {
 					locationCurrent: loc,
 					locationTotal: locTotal,
 				} = msg.payload;
-				if (cfi) setLastCfi(cfi);
 				if (waitingForRestoreRef.current) {
 					waitingForRestoreRef.current = false;
 					setIsReaderVisuallyReady(true);
@@ -407,61 +388,22 @@ export default function FoliateReaderScreen() {
 				/>
 			)}
 
-			<SafeAreaView style={styles.hud} pointerEvents="box-none">
-				<View style={styles.navRow} pointerEvents="box-none">
+			{/* Chrome: back button, visible only when toggled by a tap. */}
+			{showChrome && (
+				<SafeAreaView style={styles.chromeContainer} pointerEvents="box-none">
 					<Pressable
-						style={styles.navBtn}
-						onPress={() => readerRef.current?.prev()}
+						onPress={() => router.back()}
+						hitSlop={10}
+						style={styles.backBtn}
 					>
-						<Text style={styles.navBtnText}>← Prev</Text>
+						<View style={styles.backBtnInner}>
+							<Text style={styles.backBtnChevron}>{"‹"}</Text>
+						</View>
 					</Pressable>
+				</SafeAreaView>
+			)}
 
-					<Pressable
-						style={styles.navBtn}
-						onPress={() => setShowLogs((v) => !v)}
-					>
-						<Text style={styles.navBtnText}>
-							{showLogs ? "Hide logs" : "Show logs"}
-						</Text>
-					</Pressable>
-
-					<Pressable
-						style={styles.navBtn}
-						onPress={() => readerRef.current?.next()}
-					>
-						<Text style={styles.navBtnText}>Next →</Text>
-					</Pressable>
-				</View>
-
-				{showLogs && (
-					<View style={styles.logPanel}>
-						<ScrollView
-							style={styles.logScroll}
-							contentContainerStyle={styles.logContent}
-						>
-							{logs.map(({ id, text }) => (
-								<Text key={id} style={styles.logLine}>
-									{text}
-								</Text>
-							))}
-						</ScrollView>
-						{lastCfi ? (
-							<Text style={styles.cfiLine} numberOfLines={2}>
-								CFI: {lastCfi}
-							</Text>
-						) : null}
-						<Pressable
-							style={[styles.navBtn, styles.backBtn]}
-							onPress={() => router.back()}
-						>
-							<Text style={styles.navBtnText}>← Back to library</Text>
-						</Pressable>
-					</View>
-				)}
-			</SafeAreaView>
-
-			{/* Preparation overlay — covers the reader while pages are being measured.
-			    Placed last in JSX so it renders above the HUD. */}
+			{/* Loading overlay — visible until the reader reaches its final position. */}
 			{!isReaderVisuallyReady && (
 				<View style={styles.overlay}>
 					<ActivityIndicator size="large" color="#888" />
@@ -489,69 +431,43 @@ const styles = StyleSheet.create({
 		textAlign: "center",
 		paddingHorizontal: 20,
 	},
-	hud: {
-		position: "absolute",
-		bottom: 0,
-		left: 0,
-		right: 0,
+	chromeContainer: {
+		...StyleSheet.absoluteFillObject,
+		padding: 20,
 	},
-	navRow: {
-		flexDirection: "row",
-		justifyContent: "space-between",
-		paddingHorizontal: 12,
-		paddingBottom: 4,
-		gap: 8,
+	backBtn: {
+		width: 44,
+		height: 44,
+		borderRadius: 22,
+		overflow: "hidden",
 	},
-	navBtn: {
-		backgroundColor: "rgba(0,0,0,0.55)",
-		paddingHorizontal: 12,
-		paddingVertical: 8,
-		borderRadius: 8,
+	backBtnInner: {
+		width: 44,
+		height: 44,
+		borderRadius: 22,
+		alignItems: "center",
+		justifyContent: "center",
+		backgroundColor: "rgba(255, 255, 255, 0.55)",
+		borderWidth: 1,
+		borderColor: "rgba(255, 255, 255, 0.75)",
+		shadowColor: "#000",
+		shadowOffset: { width: 0, height: 6 },
+		shadowOpacity: 0.12,
+		shadowRadius: 16,
+		elevation: 4,
 	},
-	navBtnText: {
-		color: "#fff",
-		fontSize: 13,
-		fontFamily: "monospace",
-	},
-	logPanel: {
-		backgroundColor: "rgba(0,0,0,0.82)",
-		marginHorizontal: 8,
-		marginBottom: 8,
-		borderRadius: 8,
-		padding: 8,
-		maxHeight: 220,
-	},
-	logScroll: {
-		flex: 1,
-	},
-	logContent: {
-		paddingBottom: 4,
-	},
-	logLine: {
-		color: "#b8ffb8",
-		fontSize: 10,
-		fontFamily: "monospace",
-		lineHeight: 14,
-	},
-	cfiLine: {
-		color: "#ffdd88",
-		fontSize: 10,
-		fontFamily: "monospace",
-		marginTop: 4,
+	backBtnChevron: {
+		color: "#333",
+		fontSize: 30,
+		fontWeight: "400",
+		lineHeight: 34,
+		marginTop: -2,
 	},
 	overlay: {
 		...StyleSheet.absoluteFillObject,
 		backgroundColor: "#F1E2C9",
 		alignItems: "center",
 		justifyContent: "center",
-	},
-	overlayText: {
-		color: "#555",
-		fontSize: 16,
-	},
-	backBtn: {
-		marginTop: 6,
-		alignSelf: "flex-start",
 	},
 	btn: {
 		backgroundColor: "#333",

@@ -26,6 +26,12 @@ const BRIDGE = `(function () {
   // the footer never goes blank while Foliate briefly enters a sentinel state.
   var lastDisplayedGlobalPage = null;
   var isMeasuring = false;
+  // Set to true while a goLeft/goRight call is in flight (including async
+  // goToSpread at spine boundaries). Prevents concurrent navigations that
+  // would race on Foliate's internal spread state.
+  var isPaging = false;
+  var pendingNavAction = null;
+  var pagingTimeoutId = null;
   rnPost("log", "[FOLIATE-SPIKE] bridge init sessionId=" + sessionId);
 
   // Write the page counter into view.renderer.feet (Foliate's built-in footer zone).
@@ -131,6 +137,14 @@ const BRIDGE = `(function () {
   window.__navPrev = function () {
     rnPost("log", "[FOLIATE-SPIKE] nav prev()");
     view.prev();
+  };
+  // goLeft/goRight are direction-aware: Foliate maps them to next/prev
+  // depending on book.dir (RTL or LTR), so swipe direction matches screen space.
+  window.__navGoLeft = function () {
+    view.goLeft();
+  };
+  window.__navGoRight = function () {
+    view.goRight();
   };
   window.__goTo = function (cfi) {
     rnPost("log", "[FOLIATE-SPIKE] goTo " + cfi);
@@ -269,10 +283,34 @@ const BRIDGE = `(function () {
     // to post relocated messages; the user sees nothing.
     if (isMeasuring) return;
 
-    // Deduplicate on (cfi, section.current): identical location fired multiple
-    // times during paginator layout stabilization — same CFI, same spine.
-    // Two different navigations always produce a different CFI or spine index.
+    // Sentinel detection: paginator.js always emits a relocate on page 0 or
+    // pages-1 as the first step of any spine crossing (#scrollPrev/#scrollNext
+    // scroll to the sentinel column before calling #goTo on the adjacent section).
+    // Content pages are structurally 1..pages-2 (see #scrollToAnchor formula).
+    // Releasing isPaging on a sentinel would open a window where #locked is still
+    // true inside Foliate, so any swipe would be silently discarded by #turnPage.
+    var rendPage = view.renderer.page;
+    var rendPages = view.renderer.pages;
+    var isSentinel = rendPages <= 2 || rendPage < 1 || rendPage > rendPages - 2;
+
+    // Diagnostic log — always, including sentinels.
     var key = (cfi || "") + "|" + (section.current != null ? section.current : "");
+    rnPost("log",
+      "[FOLIATE-NAV] RELOCATE-FIRE #" + relocateCount +
+      " sec=" + (section.current != null ? section.current : "?") +
+      " page=" + rendPage + "/" + rendPages +
+      (isSentinel ? " [SENTINEL — guard held]" : "") +
+      " key=" + key.slice(0, 50)
+    );
+
+    if (isSentinel) {
+      // Crossing in progress: keep isPaging locked, skip the relocated post.
+      // The content-page relocate following the new spine's load will release it.
+      return;
+    }
+
+    // On a real content page: Foliate has fully landed after navigation.
+    releasePaging("relocate");
     if (key && key === lastRelocateKey) {
       rnPost("log",
         "[FOLIATE-SPIKE] relocate #" + relocateCount + " ignored (dup sid=" + sessionId + ")"
@@ -308,6 +346,9 @@ const BRIDGE = `(function () {
     if (view.book && view.book.dir) {
       bookDir = view.book.dir;
     }
+    // Re-attach on every section load: each spine section gets a fresh iframe
+    // with a new contentDocument, so the previous listeners are gone.
+    attachToAllContents();
     if (isMeasuring) return;
     rnPost("loaded", { index: d.index });
     rnPost(
@@ -316,30 +357,106 @@ const BRIDGE = `(function () {
     );
   });
 
-  // Touch swipe.
-  // RTL (Japanese): swipe right (dx>0) = forward = view.next()
-  //                 swipe left  (dx<0) = backward = view.prev()
-  // LTR:            swipe left  (dx<0) = forward = view.next()
-  //                 swipe right (dx>0) = backward = view.prev()
-  var _tx0 = 0;
-  document.addEventListener(
-    "touchstart",
-    function (e) {
-      _tx0 = e.changedTouches[0].clientX;
-    },
-    { passive: true }
-  );
-  document.addEventListener(
-    "touchend",
-    function (e) {
-      var dx = e.changedTouches[0].clientX - _tx0;
-      if (Math.abs(dx) < 50) return;
-      var forward = bookDir === "rtl" ? dx > 0 : dx < 0;
-      if (forward) view.next();
-      else view.prev();
-    },
-    { passive: true }
-  );
+  // ── touch: swipe navigation + background tap ─────────────────────────────
+  // Foliate renders each spine section in an iframe inside a closed shadow DOM.
+  // Touch events do not bubble across iframe boundaries, so document.addEventListener
+  // on the outer WebView document never fires for book content touches.
+  // We attach listeners directly to each iframe's contentDocument via
+  // view.renderer.getContents(), re-attaching on every "load" event because
+  // each section gets a fresh iframe (and a fresh contentDocument).
+  //
+  // Future dictionary tap: replace the reader-background-tap branch with
+  // caretRangeFromPoint(doc, x, y) to distinguish text vs. background,
+  // then post dictionary-tap or reader-background-tap accordingly.
+  var TAP_MAX_PX = 10;
+  var SWIPE_MIN_PX = 50;
+  var SWIPE_VERT_RATIO = 1.5;
+
+  function releasePaging(reason) {
+    if (!isPaging) return;
+    isPaging = false;
+    if (pagingTimeoutId) {
+      clearTimeout(pagingTimeoutId);
+      pagingTimeoutId = null;
+    }
+    rnPost("log",
+      "[FOLIATE-NAV] paging released by " + reason +
+      " action=" + (pendingNavAction || "?") +
+      " sec=" + currentSectionIndex +
+      " page=" + view.renderer.page + "/" + view.renderer.pages
+    );
+    pendingNavAction = null;
+  }
+
+  function attachTouchListeners(doc) {
+    if (!doc || doc.__suzumeTouchAttached) return;
+    doc.__suzumeTouchAttached = true;
+    var t0X = 0, t0Y = 0;
+    // Capture phase so our listeners fire before Foliate's bubbling listeners
+    // (paginator.js registers touchstart/touchmove/touchend on the same
+    // contentDocument). stopImmediatePropagation prevents Foliate's
+    // #onTouchStart/#onTouchMove/#onTouchEnd from firing, which would otherwise
+    // run a concurrent snap()/#goTo on the same swipe (no #locked guard in snap).
+    doc.addEventListener("touchstart", function (e) {
+      e.stopImmediatePropagation();
+      var t = e.changedTouches[0];
+      t0X = t.clientX;
+      t0Y = t.clientY;
+    }, { capture: true, passive: true });
+    doc.addEventListener("touchmove", function (e) {
+      e.stopImmediatePropagation();
+    }, { capture: true, passive: true });
+    doc.addEventListener("touchend", function (e) {
+      e.stopImmediatePropagation();
+      if (isMeasuring) return;
+      var t = e.changedTouches[0];
+      var dx = t.clientX - t0X;
+      var dy = t.clientY - t0Y;
+      var absX = Math.abs(dx);
+      var absY = Math.abs(dy);
+      if (absX <= TAP_MAX_PX && absY <= TAP_MAX_PX) {
+        rnPost("log", "[FOLIATE-TOUCH] tap background");
+        rnPost("reader-background-tap", {});
+        return;
+      }
+      if (absX >= SWIPE_MIN_PX && absX >= absY * SWIPE_VERT_RATIO) {
+        if (isPaging) {
+          rnPost("log", "[FOLIATE-NAV] swipe ignored (isPaging)");
+          return;
+        }
+        isPaging = true;
+        pendingNavAction = dx > 0 ? "goLeft" : "goRight";
+        rnPost("log",
+          "[FOLIATE-NAV] paging locked action=" + pendingNavAction +
+          " sec=" + currentSectionIndex +
+          " page=" + view.renderer.page + "/" + view.renderer.pages
+        );
+        // Primary release: the content-page relocate after navigation completes.
+        // Fallback: 1000ms timeout in case Foliate emits no content relocate.
+        pagingTimeoutId = setTimeout(function () {
+          pagingTimeoutId = null;
+          releasePaging("timeout");
+        }, 1000);
+        // Secondary: Promise resolves immediately for intra-section navigation.
+        // For spine crossings it may not resolve — the relocate handler covers that.
+        Promise.resolve(dx > 0 ? view.goLeft() : view.goRight())
+          .then(function () { releasePaging("promise"); })
+          .catch(function (e) {
+            releasePaging("error");
+            rnPost("log", "[FOLIATE-NAV] nav error: " + String(e));
+          });
+      }
+    }, { capture: true, passive: true });
+  }
+
+  function attachToAllContents() {
+    var contents = view.renderer.getContents();
+    rnPost("log", "[FOLIATE-TOUCH] attached contents=" + contents.length);
+    for (var i = 0; i < contents.length; i++) {
+      attachTouchListeners(contents[i].doc);
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────
 
   // Auto-open if the book base64 was pre-injected before page load.
   if (window.__BOOK_B64) {
