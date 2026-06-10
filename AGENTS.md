@@ -268,8 +268,8 @@ L'objectif du spike est de valider si `foliate-js` resout ces problemes sans qui
 - `scripts/build-foliate-bundle.js`: bundler esbuild, genere l'IIFE depuis `node_modules/foliate-js/view.js`;
 - `assets/foliate/foliate-bundle.js`: bundle IIFE genere (~317 KB); ignore par git, regenerer avec `npm run build:foliate`;
 - `src/features/reader-foliate/foliateBundle.ts`: export TypeScript de la string du bundle; genere automatiquement par le script precedent;
-- `src/features/reader-foliate/foliateReaderHtml.ts`: template HTML + script bridge WebView; contient l'open, la navigation, les events, la mesure de pagination globale et le footer natif;
-- `src/features/reader-foliate/FoliateReaderView.tsx`: composant React Native (WebView + forwardRef + postMessage); expose `next`, `prev`, `goTo`, `setPagination`, `startMeasurement`;
+- `src/features/reader-foliate/foliateReaderHtml.ts`: template HTML + script bridge WebView; contient l'open, la navigation, les events, la mesure de pagination globale, le footer natif, et la logique de tap dictionnaire (hit-testing caret-only, `classifyTap`, comportement modal `isDictionaryOpen`);
+- `src/features/reader-foliate/FoliateReaderView.tsx`: composant React Native (WebView + forwardRef + postMessage); expose `next`, `prev`, `goTo`, `setPagination`, `startMeasurement`, `clearDictionaryHighlight`, `highlightDictionaryMatch`, `setDictionaryOpen`;
 - `src/features/reader-foliate/pagination/foliatePaginationTypes.ts`: types `ReaderLayoutProfile`, `FoliateRenderedPagination`, `BookRuntimeState`, constante `FOLIATE_ENGINE_BUILD_ID`;
 - `src/features/reader-foliate/pagination/createFoliateLayoutKey.ts`: cle stable depuis le profil de layout (JSON trie, champs non-null);
 - `src/features/reader-foliate/pagination/foliateBookRuntimeStorage.ts`: lecture/ecriture AsyncStorage pour le cache de pagination (`suzume:book-runtime-state:v1:{bookId}`);
@@ -317,7 +317,7 @@ La pagination globale mesure le nombre reel de pages rendues par Foliate pour ch
 
 Une approche avec une deuxieme WebView Foliate en `opacity:0` pour mesurer la pagination sans toucher au reader principal a ete tentee et abandonnee. Raisons: deux instances WKWebView avec HTML Foliate lourd (~340 KB) et un livre de 3 MB ne peuvent pas charger simultanement sur iOS/RN sans defaillance silencieuse; les tentatives de sequencement n'ont pas suffi. Ne pas reintroduire cette approche sans raison forte et sans solution au probleme de chargement WKWebView.
 
-### Etat valide au 2026-06-07
+### Etat valide au 2026-06-09
 
 - EPUB envoye en base64 depuis React Native vers la WebView: fonctionne.
 - `foliate-js` ouvre le livre et detecte `dir=rtl`.
@@ -332,15 +332,22 @@ Une approche avec une deuxieme WebView Foliate en `opacity:0` pour mesurer la pa
 - Cache persistant AsyncStorage par `bookId + fingerprint + layoutKey`: fonctionne.
 - Footer stable au passage de spine (pas de clignotement grace a `lastDisplayedGlobalPage`): fonctionne.
 - Logs `[FOLIATE-PAGE] sec=N raw=p/P local=p offset=O global=G/T` visibles dans Metro.
+- Tap dictionnaire caret-only (`classifyTap`): fonctionne, y compris sur glyphes creux (ロ 口 田).
+- Comportement modal dictionnaire ouvert (`isDictionaryOpen`): fonctionne; swipes bloques, tap ferme le dict.
+- Connexion lookup SQLite depuis le spike: fonctionnel (meme pipeline que le lecteur historique).
+- Chrome masque automatiquement sur `dictionary-tap`: fonctionne.
 
 ### Points a valider
 
 - Coherence des offsets au passage de spine (ex: sec=25 → sec=26 doit faire G → G+1, pas G → G+23).
 - Reprise de lecture via CFI ou locator Foliate.
-- Tap sur caractere japonais et extraction du texte.
-- Connexion au dictionnaire SQLite depuis le spike.
 - Tests sur plusieurs EPUB japonais differents.
 - Decision formelle: remplacement du moteur historique, fallback, ou abandon du spike.
+
+Points desormais valides (ne pas reintroduire) :
+
+- ~~Tap sur caractere japonais et extraction du texte~~ — valide, voir section 9 de `docs/foliate-spike-notes.md`.
+- ~~Connexion au dictionnaire SQLite depuis le spike~~ — valide, meme pipeline que le lecteur historique.
 
 ### Consignes pour ce spike
 
@@ -351,6 +358,10 @@ Une approche avec une deuxieme WebView Foliate en `opacity:0` pour mesurer la pa
 - Incrementer `FOLIATE_ENGINE_BUILD_ID` si le bundle ou la logique de mesure change, pour invalider les caches.
 - Ne pas considerer Foliate comme moteur definitif tant que tap, reprise et progression ne sont pas valides.
 - Garder le spike isole du lecteur historique pendant toute la phase d'exploration.
+- Ne pas reintroduire de fallback TreeWalker / `getTextNodesUnderPoint` / Range-par-caractere dans le bridge Foliate; utiliser la strategie caret-only (`classifyTap`).
+- Ne pas ajouter d'overlay RN full-screen (`GestureDetector absoluteFill`, `PanResponder`, `Pressable absoluteFill`) pour gerer les taps sur le texte; les interactions texte restent dans la WebView / iframe Foliate.
+- Garder le court-circuit `isDictionaryOpen` cote bridge (pas seulement cote RN) avant la navigation et avant le hit-testing.
+- Ne pas confondre les touch events WebView (derriere le dictionnaire) et les interactions internes au bottom sheet.
 - Si la migration est decidee, introduire une frontiere claire (ex: `ReaderEngine`) pour ne pas melanger les deux stacks.
 
 ## Support RTL
@@ -527,3 +538,4 @@ Cette regeneration depend des zips locaux ignores par git et du binaire `sqlite3
 - Si vous touchez aux assets ignores, documenter comment les recreer ou les obtenir.
 - Si vous travaillez sur `spike/foliate-reader`, relire aussi `src/features/reader-foliate/foliateReaderHtml.ts`, `FoliateReaderView.tsx` et `scripts/build-foliate-bundle.js` avant toute modification du spike.
 - Le spike Foliate doit rester separe du lecteur historique tant que la migration n'est pas decidee; ne pas importer de code du spike dans `reader.tsx` ni inversement.
+- Pour le tap dictionnaire Foliate, ne pas introduire un nouveau systeme de hit-testing sans lire la section 9 de `docs/foliate-spike-notes.md`; la strategie caret-only a ete choisie deliberement apres mesure du cout du bruteforce sur le DOM multi-colonnes de Foliate.

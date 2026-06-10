@@ -153,15 +153,13 @@ l'iframe en cours de chargement et geler `#locked` définitivement.
 
 ### Futur dictionnaire : adaptation de `dictionaryTapScript.ts`
 
-`dictionaryTapScript.ts` a été écrit pour l'ancien reader EPUB.js. La
-majeure partie est portable telle quelle dans le bridge Foliate. Points de
-différence à gérer lors de l'implémentation :
+**RÉALISÉ — voir section 9.**
 
-- Remplacer `rendition.getContents()` par `view.renderer.getContents()`
-- La variable `doc` est celle passée à `attachTouchListeners`, pas à
-  re-chercher via `rendition`
-- Les highlight spans (`suzume-dictionary-highlight`) s'insèrent dans le
-  `contentDocument` de l'iframe, pas dans le document parent
+Le tap dictionnaire est intégré directement dans `attachTouchListeners` du
+bridge. L'approche retenue est différente d'un portage direct de
+`dictionaryTapScript.ts` : stratégie caret-only sans fallback TreeWalker,
+plus adaptée à l'architecture multi-colonnes de Foliate (iframe expansée à
+`pageCount × viewportWidth`).
 
 ---
 
@@ -550,3 +548,109 @@ autres que sec23/sec24, sans gel observé.
 [FOLIATE-NAV] RELOCATE-FIRE #N+1 sec=23 page=29/31
 [FOLIATE-NAV] paging released by relocate action=goRight sec=23 page=29/31
 ```
+
+## 9. Tap dictionnaire — architecture validée
+
+### Vue d'ensemble
+
+Le tap dictionnaire est validé dans le reader Foliate. L'implémentation est
+intégrée directement dans `attachTouchListeners` (`foliateReaderHtml.ts`) ; ce
+n'est **pas** une injection séparée comme `dictionaryTapScript.ts` du reader
+EPUB.js — les listeners `capture` du bridge bloqueraient de toute façon les
+listeners `bubble` injectés séparément.
+
+### Messages WebView → RN
+
+| Message | Payload | Cas |
+|---|---|---|
+| `dictionary-tap` | `DictionarySelection` | caractère japonais visible sous le tap |
+| `dictionary-close` | `{}` | ponctuation/texte non-lookupable, ou tap WebView quand dict ouvert |
+| `reader-background-tap` | `{}` | fond sans texte, dict fermé |
+
+### Callbacks RN → WebView (via `injectJavaScript`)
+
+| `window.__suzume…` | Usage |
+|---|---|
+| `clearDictionaryHighlight()` | effacer le surlignage |
+| `highlightDictionaryMatch(text)` | surligner le terme reconnu |
+| `setDictionaryOpen(bool)` | synchroniser l'état modal dans le bridge |
+
+`FoliateReaderView.tsx` expose ces trois callbacks via son `ref`
+(`clearDictionaryHighlight`, `highlightDictionaryMatch`, `setDictionaryOpen`).
+
+### Stratégie de hit-testing : caret-only
+
+Le fallback bruteforce (TreeWalker + `elementFromPoint` + Range par caractère)
+a été supprimé. Raisons :
+
+1. Foliate garde toutes les pages d'une section dans le DOM simultanément
+   (iframe expansée à `pageCount × viewportWidth` px). Scanner manuellement les
+   text nodes est coûteux — cas mesuré avant la réécriture : `hit=201 ms` sur
+   un bord de page avec phrase coupée.
+2. `elementFromPoint` peut retourner un conteneur large (div multi-pages),
+   rendant le TreeWalker non borné.
+
+La stratégie actuelle est O(1) (`classifyTap`) :
+
+```
+caretRangeFromPoint(x, y)
+  → offset          (candidat principal — côté droit de la frontière caret)
+  → offset - 1      (candidat secondaire — côté gauche)
+
+Pour chaque candidat :
+  → Range exact (1 caractère) + getClientRects()
+  → rectContainsPoint(rect, x, y) ?
+    → oui + isDictionaryCharacter   → "dict"   (→ dictionary-tap)
+    → oui + non-lookupable          → "text"   (→ dictionary-close)
+    → non (rect hors viewport)      → rejeter, essayer l'autre candidat
+
+Si les deux candidats échouent → "background"   (→ reader-background-tap)
+```
+
+### Bug résolu : glyphes creux (ロ 口 田 回…)
+
+`caretRangeFromPoint` retourne un **point d'insertion** (frontière entre
+caractères), pas un point à l'intérieur d'un caractère. Pour les glyphes avec
+zones vides, un tap dans le creux positionne le caret APRÈS le caractère (au
+début du suivant). En testant les deux côtés de la frontière (`offset` et
+`offset - 1`), le caractère attendu est trouvé dans les deux cas car son rect
+typographique (plein, incluant le creux) contient effectivement le tap.
+
+### Bug résolu : rejet des colonnes adjacentes
+
+Foliate garde toutes les pages d'une section dans le DOM. `caretRangeFromPoint`
+peut snapper vers un caractère de la colonne voisine (page adjacente). Ces
+caractères ont des rects hors du viewport courant (`x < 0` ou `x > W` en
+vertical RTL). `rectContainsPoint` les rejette sans connaissance de la
+structure interne des colonnes Foliate.
+
+### Comportement modal : dictionnaire ouvert
+
+L'état est synchronisé vers le bridge via `window.__suzumeSetDictionaryOpen`.
+Le court-circuit est dans `touchend`, **après** `isMeasuring` et le calcul
+`absX/absY`, **avant** les branches tap et swipe.
+
+| Contexte | Tap WebView | Swipe WebView |
+|---|---|---|
+| Dict fermé | `classifyTap` → dict / close / background | navigation normale |
+| Dict ouvert | `dictionary-close` systématique | ignoré (return) |
+
+Les interactions **dans** le bottom sheet ne sont pas affectées — le bottom
+sheet est un composant RN qui gère ses propres gestes.
+
+### Chrome
+
+`setShowChrome(false)` est appelé côté RN sur `dictionary-tap`, avant
+d'ouvrir le dictionnaire. Chrome et dictionnaire ne peuvent pas être visibles
+simultanément.
+
+### À ne pas réintroduire
+
+- Fallback TreeWalker / `getTextNodesUnderPoint` / Range-par-caractère dans le
+  bridge Foliate (coûteux, fragile sur DOM multi-pages).
+- Overlay RN full-screen (`GestureDetector absoluteFill`, `PanResponder`,
+  `Pressable absoluteFill`) pour intercepter les taps texte.
+- Injection séparée pour le dictionnaire dans la WebView Foliate — les
+  listeners `capture` du bridge bloqueraient les listeners `bubble` injectés.
+- Court-circuit dictionnaire côté RN uniquement, sans le flag `isDictionaryOpen`
+  côté bridge — les swipes WebView seraient toujours déclenchés dict ouvert.
