@@ -6,6 +6,7 @@ import {
 	useRef,
 } from "react";
 import { StyleSheet, View } from "react-native";
+import { captureRef } from "react-native-view-shot";
 import WebView, { type WebViewMessageEvent } from "react-native-webview";
 import type { DictionarySelection } from "@/features/dictionary";
 import { buildFoliateHtml } from "./foliateReaderHtml";
@@ -25,8 +26,15 @@ export type FoliateMessage =
 	  }
 	| { type: "pagination-error"; payload: { message: string } }
 	| { type: "reader-background-tap"; payload: Record<string, never> }
+	| { type: "reader-page-turn"; payload: Record<string, never> }
 	| { type: "dictionary-tap"; payload: DictionarySelection }
 	| { type: "dictionary-close"; payload: Record<string, never> }
+	// Prototype snapshot page turn: swipe validated in the bridge, navigation
+	// deferred to RN (capture → overlay → __turnNav). t = bridge Date.now().
+	| {
+			type: "turn-intent";
+			payload: { action: "goLeft" | "goRight"; dir: 1 | -1; t: number };
+	  }
 	| {
 			type: "relocated";
 			payload: {
@@ -53,6 +61,9 @@ export type FoliateReaderHandle = {
 	clearDictionaryHighlight: () => void;
 	highlightDictionaryMatch: (text: string) => void;
 	setDictionaryOpen: (open: boolean) => void;
+	// Prototype snapshot page turn.
+	capturePage: () => Promise<string>;
+	turnNav: (action: "goLeft" | "goRight") => void;
 };
 
 type Props = {
@@ -63,6 +74,9 @@ type Props = {
 export const FoliateReaderView = forwardRef<FoliateReaderHandle, Props>(
 	function FoliateReaderView({ bookBase64, onMessage }, ref) {
 		const webViewRef = useRef<WebView>(null);
+		// Capture target for the snapshot page turn: the container View wrapping
+		// the WebView only — RN siblings (chrome, dictionary sheet) are excluded.
+		const containerRef = useRef<View>(null);
 
 		// Built once — the HTML is static (bundle + bridge script).
 		const html = useMemo(() => buildFoliateHtml(), []);
@@ -110,6 +124,12 @@ export const FoliateReaderView = forwardRef<FoliateReaderHandle, Props>(
 					inject(
 						`window.__suzumeSetDictionaryOpen && window.__suzumeSetDictionaryOpen(${open});`,
 					),
+				// Visible-viewport capture of the reader. PNG (lossless) so the
+				// mounted overlay is pixel-identical to the live page beneath it.
+				capturePage: () =>
+					captureRef(containerRef, { result: "tmpfile", format: "png" }),
+				turnNav: (action: "goLeft" | "goRight") =>
+					inject(`window.__turnNav(${JSON.stringify(action)});`),
 			}),
 			[inject],
 		);
@@ -128,7 +148,7 @@ export const FoliateReaderView = forwardRef<FoliateReaderHandle, Props>(
 		);
 
 		return (
-			<View style={styles.container}>
+			<View ref={containerRef} collapsable={false} style={styles.container}>
 				<WebView
 					ref={webViewRef}
 					source={{ html }}

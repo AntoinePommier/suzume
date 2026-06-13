@@ -37,6 +37,14 @@ import {
 	type FoliateReaderHandle,
 	FoliateReaderView,
 } from "@/features/reader-foliate/FoliateReaderView";
+import {
+	SnapshotPageTurn,
+	type SnapshotPageTurnHandle,
+} from "@/features/reader-foliate/SnapshotPageTurn";
+import {
+	READER_LAYOUT,
+	SNAPSHOT_PAGE_TURN_ENABLED,
+} from "@/features/reader-foliate/foliateReaderHtml";
 import { createFoliateLayoutKey } from "@/features/reader-foliate/pagination/createFoliateLayoutKey";
 import {
 	getFoliateLastPosition,
@@ -107,6 +115,14 @@ export default function FoliateReaderScreen() {
 			orientation: viewportWidth < viewportHeight ? "portrait" : "landscape",
 			maxColumnCount: 1,
 			flow: "paginated",
+			// Layout tuning (READER_LAYOUT in foliateReaderHtml.ts) — part of
+			// the cache key: changing any value re-measures pagination instead
+			// of reusing page counts computed with the old metrics. Null values
+			// are omitted from the key, so untouched fields keep caches valid.
+			fontSize: READER_LAYOUT.fontSizePercent,
+			lineHeight: READER_LAYOUT.lineHeight,
+			margin: READER_LAYOUT.marginPx,
+			gap: READER_LAYOUT.gapPercent,
 		};
 	}, [book, viewportWidth, viewportHeight, pixelRatio]);
 
@@ -116,6 +132,8 @@ export default function FoliateReaderScreen() {
 	);
 
 	const readerRef = useRef<FoliateReaderHandle>(null);
+	// Prototype snapshot page turn (flag: SNAPSHOT_PAGE_TURN_ENABLED).
+	const snapshotTurnRef = useRef<SnapshotPageTurnHandle>(null);
 	// False until the reader has navigated to its final restored position.
 	// Drives the full-screen overlay so the user never sees an intermediate page.
 	const [isReaderVisuallyReady, setIsReaderVisuallyReady] = useState(false);
@@ -418,6 +436,13 @@ export default function FoliateReaderScreen() {
 					return { status: "loading", matchedText: "", entries: [] };
 				});
 				runDictionaryLookup(msg.payload);
+			} else if (msg.type === "turn-intent") {
+				// Prototype snapshot page turn: swipe validated in the bridge,
+				// navigation deferred until the snapshot overlay covers the reader.
+				snapshotTurnRef.current?.begin(msg.payload);
+			} else if (msg.type === "reader-page-turn") {
+				// A swipe/drag page turn returns the reader to fullscreen.
+				setShowChrome(false);
 			} else if (msg.type === "dictionary-close") {
 				closeDictionary();
 			} else if (msg.type === "reader-background-tap") {
@@ -427,6 +452,8 @@ export default function FoliateReaderScreen() {
 					setShowChrome((v) => !v);
 				}
 			} else if (msg.type === "relocated") {
+				// Snapshot turn in flight: the reader has landed, start the slide.
+				snapshotTurnRef.current?.notifyRelocated();
 				const {
 					cfi,
 					fraction,
@@ -486,6 +513,21 @@ export default function FoliateReaderScreen() {
 					ref={readerRef}
 					bookBase64={bookUri}
 					onMessage={handleMessage}
+				/>
+			)}
+
+			{/* Prototype: outgoing-page snapshot sliding above the reader.
+			    Renders nothing while idle; pointer-events none while active. */}
+			{SNAPSHOT_PAGE_TURN_ENABLED && (
+				<SnapshotPageTurn
+					ref={snapshotTurnRef}
+					capture={() =>
+						readerRef.current
+							? readerRef.current.capturePage()
+							: Promise.reject(new Error("reader not ready"))
+					}
+					nav={(action) => readerRef.current?.turnNav(action)}
+					log={addLog}
 				/>
 			)}
 
