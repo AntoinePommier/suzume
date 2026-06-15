@@ -2339,13 +2339,26 @@ const BRIDGE = `(function () {
   function ghostCommitForward(d) {
     ghostState = "exiting";
     if (!d.navDone) {
-      // Last chance before the reveal; if still locked, the exit animation
-      // (>= FINISH_MIN) outlives the lock and the hide flush delivers it.
       d.navDone = ghostNavAttempt(d.action);
       ghostLog(d.navDone
         ? "early nav landed at commit"
-        : "early nav still dropped at commit — will flush on hide");
-      if (!d.navDone) ghostOweNav(d.action, "forward-commit");
+        : "early nav still dropped at commit — retrying during exit");
+      if (!d.navDone) {
+        ghostOweNav(d.action, "forward-commit");
+        // Deliver DURING the exit, not only at hide. A forward intra reveals
+        // the REAL next page beneath the exiting ghost — so the nav MUST land
+        // while the slide is still playing, or the reveal shows the stale
+        // current page for the whole animation (page 1 of a just-loaded spine
+        // appears to repeat, then jumps once the hide flush finally lands).
+        // This happens when the swipe is a fast flick (one touchmove, no
+        // drag-move retry) within ~100ms of a crossing landing, while
+        // foliate's lock is still held. Retrying while "exiting" lands it the
+        // instant the lock clears (~60-80ms in), with the ghost still
+        // covering most of the screen; the exit is always >= GHOST_FINISH_MIN
+        // (200ms) so it outlives the ~100ms lock and the hide flush stays a
+        // no-op safety net.
+        ghostRetryNavWhile("forward-commit", "exiting");
+      }
     }
     var target = d.fingerDir * d.width;
     var ms = ghostDurTo(d, target);
