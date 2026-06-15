@@ -1,56 +1,113 @@
-# Welcome to your Expo app 👋
+# Suzume 🐦
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+A mobile reader for Japanese EPUBs, with an integrated offline dictionary and
+tap-to-look-up built for vertical Japanese typography.
 
-## Get started
+Suzume lets you import a Japanese EPUB, read it in proper vertical
+right-to-left layout, and tap any word to get an instant dictionary definition —
+all on-device, no network required.
 
-1. Install dependencies
+> **Status: work in progress.** This is a personal project under active
+> development. The core reading and lookup loop works on device; some areas
+> (page-turn polish, settings, second-pass UI) are still being built. The code
+> and architecture are intended to be production-quality even while the feature
+> set is incomplete.
 
-   ```bash
-   npm install
-   ```
+## Features
 
-2. Start the app
+**Working today**
 
-   ```bash
-   npx expo start
-   ```
+- 📖 Import and read EPUB files from the device
+- 🇯🇵 Vertical (vertical-rl) Japanese reading layout
+- 👆 Swipe / drag page navigation with custom page-turn animations
+- 📚 Local offline dictionary (SQLite), no network needed
+- 🔍 Tap a word in the text to look it up, with Japanese deinflection
+  (conjugated forms resolved back to dictionary entries)
+- 🔖 Reading progress saved and restored across sessions
 
-In the output, you'll find options to open the app in a
+**In progress**
 
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
+- Page-turn animation polish (depth/parallax, cross-section flow)
+- Reader typography settings (font size, margins)
+- UI/UX refinement of the library and lookup surfaces
 
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
+## Tech stack
 
-## Get a fresh project
+- **React Native** (0.83) + **Expo** (55) + **expo-router**
+- **TypeScript**
+- **react-native-webview** as the rendering host for the reader
+- **foliate-js** for EPUB pagination and vertical Japanese layout
+- **expo-sqlite** for the local dictionary
+- **react-native-reanimated** / **react-native-gesture-handler** for interactions
 
-When you're ready, run:
+## Technical highlights
 
-```bash
-npm run reset-project
+A few parts of the project that went beyond wiring libraries together:
+
+- **Foliate integration inside React Native.** The reader embeds the
+  [foliate-js](https://github.com/johnfactotum/foliate-js) pagination engine in a
+  WebView and drives it from the native side, to get correct vertical-rl
+  Japanese typography that off-the-shelf RN EPUB readers don't handle well.
+
+- **WebView ↔ React Native bridge.** A typed message protocol coordinates
+  navigation, reading position, dictionary taps and lifecycle between the native
+  app and the in-WebView reader, working around the constraints of foliate-js'
+  closed shadow DOM.
+
+- **Custom page-turn animations (ghost / adjacent surfaces).** iBooks-style
+  page turns — including cross-section transitions in both directions — are
+  rendered by mirroring the current and neighbouring pages onto overlay
+  surfaces, so the animation never disturbs the real paginated view. This avoids
+  the WebKit compositing artifacts that a naive transform of the reader would
+  cause.
+
+- **On-device Japanese dictionary.** A [Yomitan](https://github.com/yomidevs/yomitan)
+  dictionary (Jitendex) plus frequency data is compiled into a local SQLite
+  database; lookups run a deinflection pass so conjugated/inflected words resolve
+  to their base entries.
+
+## Project structure
+
+```
+src/
+  app/                 Expo Router screens (library, reader)
+  features/
+    library/           EPUB import & library management
+    reader-foliate/    Foliate-based vertical Japanese reader (current focus)
+    dictionary/        SQLite dictionary, deinflection, tap lookup
+scripts/
+  build-foliate-bundle.js    Bundles foliate-js for the WebView
+  build-jitendex-sqlite.js   Compiles the Yomitan dictionary into SQLite
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+## Getting started
 
-### Other setup steps
+> Requires a **development build** (the reader relies on native modules not
+> available in Expo Go).
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+```bash
+# 1. Install dependencies
+npm install
 
-## Learn more
+# 2. Build the in-WebView reader bundle
+npm run build:foliate
 
-To learn more about developing your project with Expo, look at the following resources:
+# 3. Build the dictionary database
+#    (requires a Yomitan dictionary archive in assets/dictionaries/ —
+#     not bundled in the repo)
+npm run build:jitendex
 
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
+# 4. Run on a device / simulator
+npm run ios      # or: npm run android
+```
 
-## Join the community
+## Roadmap
 
-Join our community of developers creating universal apps.
+- [ ] Finish page-turn polish (parallax depth, smoother spine transitions)
+- [ ] Reader settings (typography, margins, theme)
+- [ ] Lookup history and saved words
+- [ ] Library improvements (sorting, metadata, covers)
 
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+---
+
+*Suzume (雀) means "sparrow" in Japanese. Personal project — feedback welcome.*
