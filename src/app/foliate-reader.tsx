@@ -33,6 +33,10 @@ import { getLibraryBookById } from "@/features/library/libraryBooks";
 import type { LibraryBook } from "@/features/library/types";
 import { useBookAsset } from "@/features/reader/hooks/useBookAsset";
 import {
+	markBookOpened,
+	saveReadingProgress,
+} from "@/features/reader/readingProgressStorage";
+import {
 	type FoliateMessage,
 	type FoliateReaderHandle,
 	FoliateReaderView,
@@ -83,7 +87,11 @@ export default function FoliateReaderScreen() {
 		let active = true;
 		getLibraryBookById(normalizedBookId)
 			.then((b) => {
-				if (active) setBook(b);
+				if (!active) return;
+				setBook(b);
+				// Mark as last-opened immediately so the home Continue card points
+				// here even if the user closes before the first relocate fires.
+				if (b) markBookOpened(b.id).catch(() => undefined);
 			})
 			.catch(() => undefined);
 		return () => {
@@ -266,6 +274,15 @@ export default function FoliateReaderScreen() {
 			const fp = bookFingerprintRef.current;
 			if (b && fp) {
 				upsertFoliateLastPosition(b.id, fp, position).catch(() => {});
+				// Bridge to the shared progress store the home screen reads
+				// (progress bars + Continue card). Foliate's own CFI store drives
+				// in-reader restore; this keeps the library UI in sync. fraction
+				// is 0-1 — saveReadingProgress normalizes it to a percentage.
+				saveReadingProgress({
+					bookId: b.id,
+					location: position.cfi,
+					progress: position.fraction,
+				}).catch(() => {});
 			}
 			pendingPositionRef.current = null;
 			saveTimerRef.current = null;
@@ -282,6 +299,11 @@ export default function FoliateReaderScreen() {
 			const pending = pendingPositionRef.current;
 			if (pending && b && fp) {
 				upsertFoliateLastPosition(b.id, fp, pending).catch(() => {});
+				saveReadingProgress({
+					bookId: b.id,
+					location: pending.cfi,
+					progress: pending.fraction,
+				}).catch(() => {});
 			}
 		};
 	}, []);
