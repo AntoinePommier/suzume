@@ -2,6 +2,7 @@ import * as ExpoFileSystem from "expo-file-system/legacy";
 import { bundledBooks } from "@/books";
 import { deleteReadingProgress } from "@/features/reader/readingProgressStorage";
 import { deleteCachedEpubCover } from "@/features/reader/utils/epubCoverCache";
+import { deleteFoliateRuntimeState } from "@/features/reader-foliate/pagination/foliateBookRuntimeStorage";
 import {
 	getLibraryStorageState,
 	removeImportedBookFromStorage,
@@ -38,6 +39,7 @@ export async function deleteImportedBook(
 			}).catch(() => undefined),
 			deleteCachedEpubCover(bookId),
 			deleteReadingProgress(bookId, remainingBookIds),
+			deleteFoliateRuntimeState(bookId),
 		]);
 
 		return { status: "deleted" };

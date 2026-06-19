@@ -29,6 +29,15 @@ async function persist(state: BookRuntimeState): Promise<void> {
 	}
 }
 
+export async function deleteFoliateRuntimeState(bookId: string): Promise<void> {
+	try {
+		await AsyncStorage.removeItem(KEY_PREFIX + bookId);
+	} catch {
+		// Non-fatal: a leftover entry is keyed by bookId and would only be read
+		// again if a new book reused the exact same id.
+	}
+}
+
 export async function getFoliatePagination(
 	bookId: string,
 	bookFingerprint: string,
